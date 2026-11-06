@@ -8,6 +8,8 @@ from egyid.nid import digits_only, normalize_digits, parse_national_id
 from egyid.ocr import OcrLine
 
 HEADER_TOKENS = ("جمهورية", "مصر", "العربية", "بطاقة", "تحقيق", "الشخصية")
+TITLE_TOKENS = ("بطاقة", "تحقيق", "الشخصية")
+NAME_BAND_MIN_CY = 0.16
 EXPIRY_TOKENS = ("سارية", "حتى")
 GENDER_MAP = {
     "ذكر": "ذكر",
@@ -59,6 +61,17 @@ def _norm(text: str) -> str:
 
 def _is_header(text: str) -> bool:
     return any(token in text for token in HEADER_TOKENS)
+
+
+def is_card_title(text: str) -> bool:
+    """True when OCR looks like 'بطاقة تحقيق الشخصية', not a single shared token."""
+    return sum(1 for token in TITLE_TOKENS if token in text) >= 2
+
+
+def _name_cy_floor(lines: list[OcrLine]) -> float | None:
+    """Title center-y if found; None means use NAME_BAND_MIN_CY."""
+    titles = [line.cy for line in lines if is_card_title(line.text)]
+    return min(titles) if titles else None
 
 
 def _has_arabic(text: str) -> bool:
@@ -261,6 +274,7 @@ def extract_front(lines: list[OcrLine]) -> FrontFields:
     )
 
     skip_ids = {id(ln) for ln, _ in find_national_ids(lines)}
+    title_cy = _name_cy_floor(lines)
     arabic_right = [
         ln
         for ln in lines
@@ -270,6 +284,7 @@ def extract_front(lines: list[OcrLine]) -> FrontFields:
         and ln.cx >= 0.38
         and ln.cy < 0.62
         and _arabic_letters(ln.text)
+        and (ln.cy > title_cy if title_cy is not None else ln.cy >= NAME_BAND_MIN_CY)
     ]
     arabic_right.sort(key=lambda ln: ln.cy)
     if len(arabic_right) >= 2:

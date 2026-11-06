@@ -5,6 +5,7 @@ from datetime import date
 
 import numpy as np
 
+from egyid.classify import apply_classification, classify_id_pair
 from egyid.extract import (
     GENDER_MAP,
     RELIGION_VALUES,
@@ -32,6 +33,8 @@ from egyid.models import (
     CheckResult,
     Decision,
     DerivedFields,
+    DocumentClass,
+    DocumentClassification,
     FieldSource,
     FieldValue,
     FrontFields,
@@ -70,7 +73,8 @@ def process_id_pair(
     back_image = to_image_validation(back_loaded, back_quality)
 
     try:
-        front_fields = extract_front(_ocr_or_empty(ocr, front_loaded.array, ocr_ms, "front") if front_loaded.ok else [])
+        front_lines = _ocr_or_empty(ocr, front_loaded.array, ocr_ms, "front") if front_loaded.ok else []
+        front_fields = extract_front(front_lines)
         back_lines = _ocr_or_empty(ocr, back_loaded.array, ocr_ms, "back") if back_loaded.ok else []
         barcode_ok, barcode_score = (
             barcode_present(back_loaded.array) if back_loaded.ok else (False, 0.0)
@@ -102,6 +106,7 @@ def process_id_pair(
             full_expiry = with_extraction_trace(back_fields.expiry_date, "full_image")
             back_fields.expiry_date = merge_present(crop_expiry, full_expiry)
 
+        portrait_ok, portrait_score = (False, 0.0)
         if front_loaded.ok:
             portrait_ok, portrait_score = portrait_present(front_loaded.array)
             front_fields.portrait_present = (
@@ -114,11 +119,27 @@ def process_id_pair(
         checks, derived, decision, reasons = run_checks(
             front_fields, back_fields, derived, front_image, back_image, today=today
         )
+        classification = classify_id_pair(
+            front_image=front_loaded.array if front_loaded.ok else None,
+            back_image=back_loaded.array if back_loaded.ok else None,
+            front_lines=front_lines,
+            back_lines=back_lines,
+            front_fields=front_fields,
+            back_fields=back_fields,
+            portrait_ok=portrait_ok,
+            barcode_ok=barcode_ok,
+        )
+        decision, reasons, checks = apply_classification(classification, decision, reasons, checks)
     except OcrEngineError:
         logger.exception("OCR engine failed; routing application to human review")
         return _ocr_unavailable_result(front_image, back_image, ocr_ms)
 
-    logger.info("pipeline decision=%s reasons=%s", decision.value, ",".join(reasons) or "none")
+    logger.info(
+        "pipeline decision=%s class=%s reasons=%s",
+        decision.value,
+        classification.label.value,
+        ",".join(reasons) or "none",
+    )
     return IdDocumentResult(
         decision=decision,
         reasons=reasons,
@@ -129,6 +150,7 @@ def process_id_pair(
         derived=derived,
         checks=checks,
         ocr_ms=ocr_ms,
+        classification=classification,
     )
 
 
@@ -152,6 +174,11 @@ def _ocr_unavailable_result(
             )
         ],
         ocr_ms=ocr_ms,
+        classification=DocumentClassification(
+            label=DocumentClass.uncertain,
+            evidence=["ocr_engine_error"],
+            detail="Text recognition failed. Document type was not rejected from OCR failure.",
+        ),
     )
 
 

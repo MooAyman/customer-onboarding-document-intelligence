@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from egyid.api import create_app
+from egyid.classify import classify_id_pair
 from egyid.eval import (
     UnverifiedPairError,
     load_manifest,
@@ -46,7 +47,15 @@ from egyid.imaging import (
     looks_like_id_card,
     specular_glare_ratio,
 )
-from egyid.models import BackFields, Decision, FieldSource, FieldStatus, FieldValue, FrontFields
+from egyid.models import (
+    BackFields,
+    Decision,
+    DocumentClass,
+    FieldSource,
+    FieldStatus,
+    FieldValue,
+    FrontFields,
+)
 from egyid.nid import parse_national_id
 from egyid.ocr import OcrLine
 from egyid.pipeline import process_id_pair
@@ -169,6 +178,28 @@ def test_front_and_back_extraction_from_layout_lines():
     assert back.profession_ar.status == FieldStatus.present
     assert back.barcode_present.status == FieldStatus.present
     assert not hasattr(back, "footer_code")
+
+
+def _garbled_country_front(*, include_title: bool = True) -> list[OcrLine]:
+    lines = [
+        _line("حم هورَن فَصَ العَربيَة", 0.53, 0.45, 0.02, 0.85, 0.16),
+    ]
+    if include_title:
+        lines.append(_line("بطاقة تحقيق الشخصية", 0.98, 0.50, 0.12, 0.88, 0.18))
+    lines.extend(FRONT_LINES[2:])
+    return lines
+
+
+def test_garbled_country_header_is_not_used_as_full_name():
+    with_title = extract_front(_garbled_country_front(include_title=True))
+    assert with_title.full_name_ar.value == "محمد أحمد علي حسن"
+    assert "هور" not in (with_title.full_name_ar.value or "")
+    assert "القاهرة" in (with_title.address_ar.value or "")
+
+    no_title = extract_front(_garbled_country_front(include_title=False))
+    assert no_title.full_name_ar.value == "محمد أحمد علي حسن"
+    assert "العَربيَة" not in (no_title.full_name_ar.value or "")
+    assert "القاهرة" in (no_title.address_ar.value or "")
 
 
 def test_compact_dates_valid_lengths_only():
@@ -1992,7 +2023,7 @@ def test_ocr_exception_on_resubmit_goes_to_needs_review(monkeypatch, tmp_path):
     assert Path(store.get(app_id)["front_path"]).read_bytes() == replacement["front"][1]
 
 
-def test_empty_ocr_without_exception_still_rejects(monkeypatch, tmp_path):
+def test_empty_ocr_without_exception_goes_to_review(monkeypatch, tmp_path):
     from egyid import pipeline as pipeline_mod
 
     client, store = _workflow_client(tmp_path, monkeypatch)
@@ -2000,9 +2031,11 @@ def test_empty_ocr_without_exception_still_rejects(monkeypatch, tmp_path):
     created = _submit(client)
     assert created.status_code == 200
     body = created.json()
-    assert body["status"] == "rejected"
-    assert body["automated_decision"] == "failed"
-    assert store.get(body["id"])["status"] == "rejected"
+    assert body["status"] == "pending_review"
+    assert body["automated_decision"] == "needs_review"
+    rec = store.get(body["id"])
+    assert rec["status"] == "pending_review"
+    assert rec["extraction"]["classification"]["label"] == "uncertain"
 
 
 def test_stale_accept_returns_conflict(monkeypatch, tmp_path):
@@ -2020,6 +2053,207 @@ def test_stale_accept_returns_conflict(monkeypatch, tmp_path):
     )
     assert second.status_code == 409
     assert client.get(f"/v1/applications/{app_id}").json()["status"] == "approved"
+
+
+PASSPORT_LINES = [
+    _line("PASSPORT", 0.99, 0.10, 0.06, 0.42, 0.14),
+    _line("P<GBRSMITH<<JOHN<<<<<<<<<<<<<<<<<<<<<<<<<", 0.98, 0.04, 0.80, 0.96, 0.92),
+    _line("29901011234567", 0.95, 0.20, 0.48, 0.72, 0.58),
+]
+INVOICE_NID_LINES = [
+    _line("INVOICE 1042", 0.96, 0.10, 0.08, 0.55, 0.16),
+    _line("29901011234567", 0.94, 0.20, 0.40, 0.70, 0.50),
+]
+UNCERTAIN_LINES = [
+    _line("some scanned notes", 0.80, 0.20, 0.30, 0.70, 0.40),
+]
+
+
+def _blank_pair_images():
+    front_img = np.full((500, 800, 3), 180, dtype=np.uint8)
+    back_img = np.full((700, 800, 3), 180, dtype=np.uint8)
+    back_img[500:, ::3] = 255
+    return front_img, back_img
+
+
+def test_classifier_labels_target_non_target_and_uncertain():
+    front_fields = extract_front(FRONT_LINES)
+    back_fields = extract_back(BACK_LINES, True, 0.8)
+    target = classify_id_pair(
+        front_image=None,
+        back_image=None,
+        front_lines=FRONT_LINES,
+        back_lines=BACK_LINES,
+        front_fields=front_fields,
+        back_fields=back_fields,
+    )
+    assert target.label is DocumentClass.target_id
+
+    garbled_fields = extract_front(_garbled_country_front())
+    garbled = classify_id_pair(
+        front_image=None,
+        back_image=None,
+        front_lines=_garbled_country_front(),
+        back_lines=BACK_LINES,
+        front_fields=garbled_fields,
+        back_fields=back_fields,
+    )
+    assert garbled.label is DocumentClass.target_id
+
+    passport_front = extract_front(PASSPORT_LINES)
+    passport_back = extract_back(PASSPORT_LINES, False, 0.0)
+    passport = classify_id_pair(
+        front_image=None,
+        back_image=None,
+        front_lines=PASSPORT_LINES,
+        back_lines=PASSPORT_LINES,
+        front_fields=passport_front,
+        back_fields=passport_back,
+    )
+    assert passport.label is DocumentClass.non_target
+    assert passport_front.national_id.status == FieldStatus.present
+
+    invoice_front = extract_front(INVOICE_NID_LINES)
+    invoice_back = extract_back(INVOICE_NID_LINES, False, 0.0)
+    invoice = classify_id_pair(
+        front_image=None,
+        back_image=None,
+        front_lines=INVOICE_NID_LINES,
+        back_lines=[],
+        front_fields=invoice_front,
+        back_fields=invoice_back,
+    )
+    assert invoice.label is DocumentClass.non_target
+    assert invoice_front.national_id.status == FieldStatus.present
+
+    uncertain = classify_id_pair(
+        front_image=None,
+        back_image=None,
+        front_lines=UNCERTAIN_LINES,
+        back_lines=[],
+        front_fields=FrontFields(),
+        back_fields=BackFields(),
+    )
+    assert uncertain.label is DocumentClass.uncertain
+
+    scene = classify_id_pair(
+        front_image=_scene_photo(),
+        back_image=_plain_document(),
+        front_lines=[],
+        back_lines=[],
+        front_fields=FrontFields(),
+        back_fields=BackFields(),
+    )
+    assert scene.label is DocumentClass.non_target
+
+
+def test_pipeline_classification_overrides_nid_only_foreign_document():
+    front_img, back_img = _blank_pair_images()
+    result = process_id_pair(
+        _png_bytes(front_img),
+        _png_bytes(back_img),
+        engine=StubEngine(PASSPORT_LINES, PASSPORT_LINES),
+    )
+    assert result.classification.label is DocumentClass.non_target
+    assert result.decision is Decision.failed
+    assert "document_type_non_target" in result.reasons
+    assert result.front.national_id.status == FieldStatus.present
+
+    uncertain = process_id_pair(
+        _png_bytes(front_img),
+        _png_bytes(back_img),
+        engine=StubEngine(UNCERTAIN_LINES, []),
+    )
+    assert uncertain.classification.label is DocumentClass.uncertain
+    assert uncertain.decision is Decision.needs_review
+    assert "document_type_uncertain" in uncertain.reasons
+
+    genuine_errors = process_id_pair(
+        _png_bytes(front_img),
+        _png_bytes(back_img),
+        engine=StubEngine(_garbled_country_front(), BACK_LINES_MATCHED),
+    )
+    assert genuine_errors.classification.label is DocumentClass.target_id
+    assert genuine_errors.front.full_name_ar.value == "محمد أحمد علي حسن"
+
+
+def test_non_target_rejected_on_submit_and_resubmit(monkeypatch, tmp_path):
+    from egyid import pipeline as pipeline_mod
+    from egyid.workflow import NON_TARGET_MESSAGE
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "default_engine",
+        lambda: StubEngine(PASSPORT_LINES, PASSPORT_LINES),
+    )
+    created = _submit(client, files=_png_pair(tag=21))
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["status"] == "rejected"
+    assert body["automated_decision"] == "failed"
+    assert body["customer_message"] == NON_TARGET_MESSAGE
+    rec = store.get(body["id"])
+    assert rec["extraction"]["classification"]["label"] == "non_target"
+    assert rec["extraction"]["front"]["national_id"]["value"] == "29901011234567"
+    pending = client.get("/v1/review/applications", params={"status": "pending_review"}).json()
+    assert pending["applications"] == []
+
+    client2, store2 = _workflow_client(tmp_path / "resub", monkeypatch)
+    app_id = _prepare_resubmit(client2, files=_png_pair(tag=22))
+    monkeypatch.setattr(
+        pipeline_mod,
+        "default_engine",
+        lambda: StubEngine(PASSPORT_LINES, PASSPORT_LINES),
+    )
+    again = _submit(client2, f"/v1/applications/{app_id}/resubmit", files=_png_pair(tag=23))
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == app_id
+    assert again.json()["status"] == "rejected"
+    assert store2.get(app_id)["extraction"]["classification"]["label"] == "non_target"
+
+
+def test_non_target_does_not_claim_extracted_nid(monkeypatch, tmp_path):
+    from egyid import pipeline as pipeline_mod
+
+    client, _store = _workflow_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "default_engine",
+        lambda: StubEngine(PASSPORT_LINES, PASSPORT_LINES),
+    )
+    first = _submit(client, files=_png_pair(tag=31))
+    assert first.status_code == 200
+    assert first.json()["status"] == "rejected"
+
+    monkeypatch.setattr(
+        pipeline_mod,
+        "default_engine",
+        lambda: StubEngine(FRONT_LINES, BACK_LINES_MATCHED),
+    )
+    second = _submit(client, customer_id=CUSTOMER_B, files=_png_pair(tag=32))
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] in {"pending_review", "approved"}
+
+
+def test_uncertain_submit_is_persisted_for_review(monkeypatch, tmp_path):
+    from egyid import pipeline as pipeline_mod
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "default_engine",
+        lambda: StubEngine(UNCERTAIN_LINES, []),
+    )
+    created = _submit(client, files=_png_pair(tag=41))
+    assert created.status_code == 200
+    body = created.json()
+    assert body["status"] == "pending_review"
+    assert body["automated_decision"] == "needs_review"
+    rec = store.get(body["id"])
+    assert rec["extraction"]["classification"]["label"] == "uncertain"
+    queue = client.get("/v1/review/applications", params={"status": "pending_review"}).json()
+    assert queue["applications"][0]["id"] == body["id"]
 
 
 def _wait_health(base: str, timeout: float = 20) -> None:

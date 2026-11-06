@@ -40,6 +40,10 @@ DUPLICATE_KIND_MESSAGES = {
     "back": "This back image has already been submitted in another application.",
     "nid": DUPLICATE_NID_MESSAGE,
 }
+NON_TARGET_MESSAGE = (
+    "The uploaded images are not an Egyptian national ID card. "
+    "Please upload photos of the front and back of an Egyptian national ID."
+)
 
 
 def duplicate_messages(kinds: tuple[str, ...] | list[str]) -> list[str]:
@@ -205,7 +209,8 @@ def submit_application(
         back_content_type=back_content_type,
     )
     extraction = result.model_dump_public()
-    nids = nids_from_extraction(extraction)
+    class_label = ((extraction.get("classification") or {}).get("label"))
+    nids = [] if class_label == "non_target" else nids_from_extraction(extraction)
     if existing:
         nids = list(dict.fromkeys([*store.claimed_nids(app_id), *nids]))
     store.reject_duplicates(nids, images, existing["id"] if existing else None)
@@ -220,6 +225,10 @@ def submit_application(
         store.discard_files([tmp for tmp, _dest in temps])
         raise
     status = status_from_automated(result.decision.value)
+    if "document_type_non_target" in result.reasons:
+        customer_message = NON_TARGET_MESSAGE
+    else:
+        customer_message = _message(status)
     payload = {
         "id": app_id,
         "status": status,
@@ -237,7 +246,7 @@ def submit_application(
         "automated_reasons": list(result.reasons),
         "reviewer_action": None,
         "reviewer_reason": None,
-        "customer_message": _message(status),
+        "customer_message": customer_message,
         "customer_id": owner,
     }
     try:

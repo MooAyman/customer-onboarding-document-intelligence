@@ -33,6 +33,11 @@ def _redacted_view(result) -> dict:
             if not c.passed
         ],
         "ocr_ms": result.ocr_ms,
+        "classification": {
+            "label": result.classification.label.value,
+            "evidence": result.classification.evidence,
+            "detail": result.classification.detail,
+        },
         "present_fields": [
             name
             for section in (result.front, result.back, result.derived)

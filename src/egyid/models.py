@@ -25,6 +25,18 @@ class Decision(str, Enum):
     failed = "failed"
 
 
+class DocumentClass(str, Enum):
+    target_id = "target_id"
+    non_target = "non_target"
+    uncertain = "uncertain"
+
+
+class DocumentClassification(BaseModel):
+    label: DocumentClass = DocumentClass.uncertain
+    evidence: list[str] = Field(default_factory=list)
+    detail: str = ""
+
+
 class Severity(str, Enum):
     info = "info"
     warning = "warning"
@@ -149,6 +161,7 @@ class IdDocumentResult(BaseModel):
     derived: DerivedFields
     checks: list[CheckResult]
     ocr_ms: dict[str, int] = Field(default_factory=dict)
+    classification: DocumentClassification = Field(default_factory=DocumentClassification)
 
     def model_dump_public(self) -> dict[str, Any]:
         """Full structured result for the API consumer."""
