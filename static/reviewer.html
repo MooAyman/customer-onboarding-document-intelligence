@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reviewer dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <p class="kicker">Telecom onboarding</p>
+          <h1>Reviewer dashboard</h1>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="/">Customer</a>
+        <a href="/review" aria-current="page">Reviewer</a>
+      </nav>
+    </header>
+
+    <main class="review-layout">
+      <aside class="queue workspace">
+        <h2>Applications</h2>
+        <p class="lede" id="queue-summary">Loading…</p>
+        <div id="queue"></div>
+      </aside>
+      <section class="workspace hidden" id="detail">
+        <div class="decisions">
+          <div class="decision" id="auto-banner"></div>
+          <div class="decision" id="review-banner"></div>
+        </div>
+        <div class="intake compact">
+          <article>
+            <p class="side-label">Front</p>
+            <div class="preview" id="front-preview">No image</div>
+          </article>
+          <article>
+            <p class="side-label">Back</p>
+            <div class="preview" id="back-preview">No image</div>
+          </article>
+        </div>
+        <div class="grid">
+          <section>
+            <h2>Extracted record</h2>
+            <p class="lede">Original OCR stays visible. Use the pencil only when the card shows a different value.</p>
+            <div id="field-groups"></div>
+          </section>
+          <aside>
+            <h2>Decision</h2>
+            <p class="lede" id="review-summary">Select an application.</p>
+            <ul class="issues" id="review-issues"></ul>
+            <label class="reason-box">
+              <span>Reason for reject or resubmission</span>
+              <textarea id="decision-reason" rows="3"></textarea>
+            </label>
+            <div class="decision-actions">
+              <button id="accept" type="button" disabled>Accept</button>
+              <button id="reject" type="button" class="danger" disabled>Reject</button>
+              <button id="resubmit" type="button" class="warn" disabled>Request resubmission</button>
+            </div>
+            <p class="hint" id="status-line"></p>
+            <h2 class="later">Automated checks</h2>
+            <div id="checks"></div>
+            <p class="timing" id="timing"></p>
+          </aside>
+        </div>
+      </section>
+    </main>
+    <script src="/static/reviewer.js"></script>
+  </body>
+</html>

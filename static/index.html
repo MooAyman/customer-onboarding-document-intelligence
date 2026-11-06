@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Customer portal</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <p class="kicker">Telecom onboarding</p>
+          <h1>Customer portal</h1>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="/" aria-current="page">Customer</a>
+        <a href="/review">Reviewer</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="intake" aria-label="Upload identity documents">
+        <article class="drop" id="drop-front">
+          <p class="side-label">Front</p>
+          <label class="chooser">
+            <input id="front-file" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/tiff" />
+            <span>Choose or drop image</span>
+          </label>
+          <div class="preview empty" id="front-preview">No image</div>
+          <p class="meta" id="front-meta"></p>
+        </article>
+        <article class="drop" id="drop-back">
+          <p class="side-label">Back</p>
+          <label class="chooser">
+            <input id="back-file" type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/tiff" />
+            <span>Choose or drop image</span>
+          </label>
+          <div class="preview empty" id="back-preview">No image</div>
+          <p class="meta" id="back-meta"></p>
+        </article>
+        <div class="actions">
+          <button id="submit" type="button" disabled>Submit application</button>
+          <p class="hint" id="status-line">Upload both sides of your national ID to start onboarding.</p>
+        </div>
+      </section>
+
+      <section class="workspace hidden" id="status-panel">
+        <div class="decision" id="status-banner"></div>
+        <p class="lede" id="status-message"></p>
+        <p class="meta" id="app-id-line"></p>
+        <div id="next-stage" class="next-stage hidden">
+          <h2>Next stage</h2>
+          <p>Application form — not implemented yet. Your ID verification is complete, so this step can be added later without changing the document pipeline.</p>
+        </div>
+        <div id="resubmit-box" class="hidden">
+          <p class="lede">Use the upload boxes above, then resubmit this application.</p>
+          <button id="resubmit" type="button" disabled>Resubmit images</button>
+        </div>
+      </section>
+
+      <section class="workspace" id="history-panel">
+        <h2>Your applications</h2>
+        <p class="lede">Statuses stay on this machine. Refreshing this page reloads them from the server.</p>
+        <div id="history"></div>
+      </section>
+    </main>
+    <script src="/static/customer.js"></script>
+  </body>
+</html>

@@ -1,0 +1,40 @@
+.venv/
+venv/
+env/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.pyc
+.env
+.env.*
+!.env.example
+logs/
+outputs/
+artifacts/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+*.log
+
+# Local workflow data — never commit
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+uploads/
+data/
+
+# Reference ID photographs contain PII — never commit
+National IDs/
+*.jpeg
+*.jpg
+*.png
+*.webp
+*.tif
+*.tiff
+!tests/fixtures/**
