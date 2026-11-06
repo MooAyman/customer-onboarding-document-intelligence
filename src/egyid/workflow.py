@@ -7,7 +7,7 @@ from typing import Any
 
 from egyid.imaging import assess_quality, load_image, looks_like_id_card
 from egyid.models import Decision
-from egyid.nid import nids_from_extraction
+from egyid.nid import canonical_nid, nids_from_extraction
 from egyid.pipeline import process_id_pair
 from egyid.review import build_review
 from egyid.store import Store, sha256_hex
@@ -16,8 +16,8 @@ STAGE_ID = "id_verification"
 STAGE_NEXT = "application_form"
 CUSTOMER_MESSAGES = {
     "approved": "Your identity document was verified. You can continue to the next onboarding stage.",
-    "pending_review": "Your application is pending human review. Refresh this page to see updates.",
-    "rejected": "Your application was rejected.",
+    "pending_review": "Your application is pending human review. This page updates automatically.",
+    "rejected": "Your application was rejected. You cannot submit another application with the same National ID.",
     "resubmission_required": "Please upload new front and back ID images and resubmit.",
 }
 UPLOAD_FAIL = {
@@ -61,7 +61,20 @@ def _now() -> str:
 def status_from_automated(decision: str) -> str:
     if decision == Decision.completed.value:
         return "approved"
+    if decision == Decision.failed.value:
+        return "rejected"
     return "pending_review"
+
+
+def nids_from_review(review: dict[str, Any] | None) -> list[str]:
+    found: list[str] = []
+    for field in (review or {}).get("fields") or []:
+        if field.get("id") not in {"front.national_id", "back.national_id"}:
+            continue
+        nid = canonical_nid(field.get("final_value"))
+        if nid and nid not in found:
+            found.append(nid)
+    return found
 
 
 def _message(status: str, reason: str | None = None) -> str:
@@ -185,8 +198,6 @@ def submit_application(
     images = {"front": sha256_hex(front_bytes), "back": sha256_hex(back_bytes)}
     store.reject_duplicates([], images, existing["id"] if existing else None)
 
-    front_path = store.save_image(app_id, "front", front_bytes, front_filename)
-    back_path = store.save_image(app_id, "back", back_bytes, back_filename)
     result = process_id_pair(
         front_bytes,
         back_bytes,
@@ -195,6 +206,19 @@ def submit_application(
     )
     extraction = result.model_dump_public()
     nids = nids_from_extraction(extraction)
+    if existing:
+        nids = list(dict.fromkeys([*store.claimed_nids(app_id), *nids]))
+    store.reject_duplicates(nids, images, existing["id"] if existing else None)
+
+    front_path = store.image_dest(app_id, "front", front_filename)
+    back_path = store.image_dest(app_id, "back", back_filename)
+    temps: list[tuple[Path, Path]] = []
+    try:
+        temps.append((store.write_temp(front_path, front_bytes), front_path))
+        temps.append((store.write_temp(back_path, back_bytes), back_path))
+    except Exception:
+        store.discard_files([tmp for tmp, _dest in temps])
+        raise
     status = status_from_automated(result.decision.value)
     payload = {
         "id": app_id,
@@ -216,9 +240,18 @@ def submit_application(
         "customer_message": _message(status),
         "customer_id": owner,
     }
-    if existing:
-        return store.update(app_id, nids=nids, images=images, **payload)
-    return store.create(payload, nids=nids, images=images)
+    try:
+        if existing:
+            return store.update(app_id, nids=nids, images=images, replace_pairs=temps, **payload)
+        store.replace_images(temps)
+        try:
+            return store.create(payload, nids=nids, images=images)
+        except Exception:
+            store.discard_files([front_path, back_path])
+            raise
+    except Exception:
+        store.discard_files([tmp for tmp, _dest in temps])
+        raise
 
 
 def apply_reviewer_decision(
@@ -253,8 +286,10 @@ def apply_reviewer_decision(
         status = "resubmission_required"
         reviewer_action = "resubmission_required"
 
+    nids = nids_from_review(review) if action == "accept" else None
     updated = store.update(
         application_id,
+        nids=nids,
         status=status,
         stage=_stage(status),
         reviewed_at=_now(),
@@ -263,6 +298,7 @@ def apply_reviewer_decision(
         reviewer_action=reviewer_action,
         reviewer_reason=note or None,
         customer_message=_message(status, note),
+        expected_status="pending_review",
     )
     return updated, review, True
 

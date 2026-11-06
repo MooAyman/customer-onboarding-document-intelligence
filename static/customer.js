@@ -85,6 +85,13 @@ function bothReady() {
   return Boolean(frontInput.files[0] && backInput.files[0]);
 }
 
+function syncButtons() {
+  const ready = bothReady();
+  const resubmitting = Boolean(current && current.can_resubmit);
+  submitBtn.disabled = !ready || resubmitting;
+  resubmitBtn.disabled = !(resubmitting && ready);
+}
+
 function statusClass(status) {
   if (status === "approved") return "completed";
   if (status === "rejected") return "failed";
@@ -111,11 +118,17 @@ function renderStatus(app) {
   document.getElementById("status-message").textContent = message;
   statusLine.textContent = message;
   document.getElementById("app-id-line").textContent = `Application ${app.id}`;
-  document.getElementById("next-stage").classList.toggle("hidden", !(app.next_stage && app.next_stage.available));
+  document.getElementById("next-stage").classList.add("hidden");
   document.getElementById("resubmit-box").classList.toggle("hidden", !app.can_resubmit);
-  resubmitBtn.disabled = !(app.can_resubmit && bothReady());
+  syncButtons();
   if (app.status === "pending_review") startPoll(app.id);
   else stopPoll();
+}
+
+function formatWhen(value) {
+  if (!value) return "";
+  const dt = new Date(value);
+  return Number.isNaN(dt.getTime()) ? value : dt.toLocaleString();
 }
 
 function renderHistory(items) {
@@ -128,7 +141,7 @@ function renderHistory(items) {
     .map(
       (app) => `<button type="button" class="queue-item ${statusClass(app.status)}" data-id="${app.id}">
         <strong>${statusTitle(app.status)}</strong>
-        <span>${app.id.slice(0, 8)} · ${app.updated_at || ""}</span>
+        <span>${app.id.slice(0, 8)} · ${formatWhen(app.updated_at)}</span>
       </button>`
     )
     .join("");
@@ -198,13 +211,11 @@ bindDrop("drop-front", frontInput);
 bindDrop("drop-back", backInput);
 frontInput.addEventListener("change", () => {
   showPreview(frontInput, "front-preview", "front-meta", { set url(v) { frontUrl = v; }, get url() { return frontUrl; } });
-  submitBtn.disabled = !bothReady();
-  resubmitBtn.disabled = !(current && current.can_resubmit && bothReady());
+  syncButtons();
 });
 backInput.addEventListener("change", () => {
   showPreview(backInput, "back-preview", "back-meta", { set url(v) { backUrl = v; }, get url() { return backUrl; } });
-  submitBtn.disabled = !bothReady();
-  resubmitBtn.disabled = !(current && current.can_resubmit && bothReady());
+  syncButtons();
 });
 
 submitBtn.addEventListener("click", async () => {
@@ -222,7 +233,7 @@ submitBtn.addEventListener("click", async () => {
     statusLine.classList.add("error");
     statusLine.textContent = error.message;
   } finally {
-    submitBtn.disabled = !bothReady();
+    syncButtons();
   }
 });
 
@@ -240,7 +251,7 @@ resubmitBtn.addEventListener("click", async () => {
     statusLine.classList.add("error");
     statusLine.textContent = error.message;
   } finally {
-    resubmitBtn.disabled = !(current && current.can_resubmit && bothReady());
+    syncButtons();
   }
 });
 

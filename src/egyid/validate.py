@@ -18,6 +18,20 @@ from egyid.nid import parse_national_id
 
 MIN_AGE = 18
 ISSUE_EXPIRY_MONTHS = (70, 90)
+_GENDER_CANON = {
+    "ذكر": "ذكر",
+    "male": "ذكر",
+    "Male": "ذكر",
+    "أنثى": "أنثى",
+    "انثى": "أنثى",
+    "female": "أنثى",
+    "Female": "أنثى",
+}
+
+
+def canonicalize_gender(value: str | None) -> str:
+    text = (value or "").strip()
+    return _GENDER_CANON.get(text, text)
 
 
 def _iso_date(value: str | None) -> date | None:
@@ -41,12 +55,14 @@ def _age_years(born: date, today: date) -> int:
 
 def derive_from_nid(front: FrontFields, back: BackFields) -> DerivedFields:
     derived = DerivedFields()
-    nid_value = None
+    parsed = None
     for candidate in (front.national_id, back.national_id):
-        if candidate.status == FieldStatus.present and candidate.value:
-            nid_value = candidate.value
+        if candidate.status != FieldStatus.present or not candidate.value:
+            continue
+        candidate_parsed = parse_national_id(candidate.value)
+        if candidate_parsed and candidate_parsed.ok:
+            parsed = candidate_parsed
             break
-    parsed = parse_national_id(nid_value)
     if parsed is None:
         return derived
     if parsed.date_of_birth:
@@ -179,7 +195,9 @@ def run_checks(
         back.gender_printed.status == FieldStatus.present
         and derived.gender.status == FieldStatus.present
     ):
-        gender_match = back.gender_printed.value == derived.gender.value
+        gender_match = canonicalize_gender(back.gender_printed.value) == canonicalize_gender(
+            derived.gender.value
+        )
         add(
             "printed_derived_gender_match",
             gender_match,

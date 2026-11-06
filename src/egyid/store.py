@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -56,7 +57,7 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._init()
 
@@ -238,15 +239,62 @@ class Store:
             except sqlite3.IntegrityError as exc:
                 raise DuplicateSubmissionError([side]) from exc
 
-    def save_image(self, application_id: str, side: str, data: bytes, filename: str | None) -> Path:
+    def claimed_nids(self, application_id: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT nid FROM application_nids WHERE application_id = ?",
+                (application_id,),
+            ).fetchall()
+        return [row["nid"] for row in rows]
+
+    def image_dest(self, application_id: str, side: str, filename: str | None) -> Path:
         folder = self.upload_dir / application_id
         folder.mkdir(parents=True, exist_ok=True)
         suffix = Path(filename or f"{side}.png").suffix.lower() or ".png"
         if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}:
             suffix = ".png"
-        path = folder / f"{side}{suffix}"
-        path.write_bytes(data)
-        return path
+        return folder / f"{side}{suffix}"
+
+    def write_temp(self, dest: Path, data: bytes) -> Path:
+        tmp = dest.with_name(dest.name + ".tmp")
+        tmp.write_bytes(data)
+        if tmp.stat().st_size != len(data):
+            tmp.unlink(missing_ok=True)
+            raise OSError(f"incomplete write for {tmp.name}")
+        return tmp
+
+    def replace_images(self, pairs: list[tuple[Path, Path]]) -> None:
+        for tmp, dest in pairs:
+            os.replace(tmp, dest)
+
+    def _backup_and_replace(self, pairs: list[tuple[Path, Path]]) -> list[tuple[Path, Path]]:
+        backups: list[tuple[Path, Path]] = []
+        try:
+            for tmp, dest in pairs:
+                if dest.is_file():
+                    bak = dest.with_name(dest.name + ".bak")
+                    os.replace(dest, bak)
+                    backups.append((bak, dest))
+                os.replace(tmp, dest)
+            return backups
+        except Exception:
+            self._restore_backups(backups)
+            raise
+
+    def _restore_backups(self, backups: list[tuple[Path, Path]]) -> None:
+        for bak, dest in reversed(backups):
+            if bak.is_file():
+                os.replace(bak, dest)
+
+    def discard_files(self, paths: list[Path]) -> None:
+        for path in paths:
+            path.unlink(missing_ok=True)
+
+    def save_image(self, application_id: str, side: str, data: bytes, filename: str | None) -> Path:
+        dest = self.image_dest(application_id, side, filename)
+        tmp = self.write_temp(dest, data)
+        os.replace(tmp, dest)
+        return dest
 
     def create(
         self,
@@ -302,7 +350,7 @@ class Store:
                 self._put_nids(record["id"], claimed)
                 self._put_images(record["id"], images)
                 self._conn.commit()
-            except DuplicateSubmissionError:
+            except Exception:
                 self._conn.rollback()
                 raise
         return self.get(record["id"])
@@ -314,6 +362,8 @@ class Store:
         images: dict[str, str] | None = None,
         **fields: Any,
     ) -> dict[str, Any]:
+        expected_status = fields.pop("expected_status", None)
+        replace_pairs = fields.pop("replace_pairs", None)
         mapping = {
             "status": "status",
             "stage": "stage",
@@ -348,24 +398,35 @@ class Store:
             values.append(value)
         values.append(application_id)
         claimed = None if nids is None else self._unique_nids(nids)
+        backups: list[tuple[Path, Path]] = []
         with self._lock:
             try:
                 if claimed is not None or images is not None:
                     kinds = self._duplicate_kinds(claimed or [], images, application_id)
                     if kinds:
                         raise DuplicateSubmissionError(kinds)
-                self._conn.execute(
-                    f"UPDATE applications SET {', '.join(assignments)} WHERE id = ?",
-                    values,
-                )
+                sql = f"UPDATE applications SET {', '.join(assignments)} WHERE id = ?"
+                params: list[Any] = list(values)
+                if expected_status is not None:
+                    sql += " AND status = ?"
+                    params.append(expected_status)
+                cursor = self._conn.execute(sql, params)
+                if expected_status is not None and cursor.rowcount == 0:
+                    self._conn.rollback()
+                    raise PermissionError("application is not pending review")
                 if claimed is not None:
                     self._put_nids(application_id, claimed)
                 if images is not None:
                     self._put_images(application_id, images)
+                if replace_pairs:
+                    backups = self._backup_and_replace(replace_pairs)
                 self._conn.commit()
-            except DuplicateSubmissionError:
+            except Exception:
+                self._restore_backups(backups)
                 self._conn.rollback()
                 raise
+            else:
+                self.discard_files([bak for bak, _dest in backups])
         found = self.get(application_id)
         if found is None:
             raise KeyError(application_id)

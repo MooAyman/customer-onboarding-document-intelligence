@@ -237,7 +237,17 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         if not applied:
             reasons = (review or {}).get("review_reasons") or []
-            detail = MSG_NID_MISMATCH if "front_back_nid_match" in reasons else "review incomplete"
+            field_messages = [
+                message
+                for item in (review or {}).get("fields") or []
+                for message in (item.get("review_validation") or {}).get("messages") or []
+            ]
+            if "front_back_nid_match" in reasons:
+                detail = MSG_NID_MISMATCH
+            elif field_messages:
+                detail = field_messages[0]
+            else:
+                detail = "review incomplete"
             return JSONResponse(
                 status_code=422,
                 content={"detail": detail, "review": review},

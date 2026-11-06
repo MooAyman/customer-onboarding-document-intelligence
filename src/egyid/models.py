@@ -62,8 +62,14 @@ class FieldValue(BaseModel):
         cls,
         confidence: float | None = None,
         source: FieldSource = FieldSource.printed,
+        raw_ocr: str | None = None,
     ) -> FieldValue:
-        return cls(status=FieldStatus.unreadable, confidence=confidence, source=source)
+        return cls(
+            status=FieldStatus.unreadable,
+            confidence=confidence,
+            source=source,
+            raw_ocr=raw_ocr,
+        )
 
     @classmethod
     def absent(cls) -> FieldValue:

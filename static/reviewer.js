@@ -36,6 +36,8 @@ const MSG = {
   expired: "Expired must be true if the expiry date is in the past, and false if it is still valid.",
   govCode: "Governorate code must be a valid two-digit Egyptian NID code.",
   govName: "Governorate name must match the governorate code.",
+  govNid: "Governorate must match the National ID.",
+  age: "Applicant must be at least 18 years old.",
 };
 const GOVERNORATES = {
   "01": "القاهرة", "02": "الإسكندرية", "03": "بورسعيد", "04": "السويس",
@@ -157,6 +159,10 @@ function govPairError(path, value) {
   const code = digitsOnly(path === codePath ? value : liveValue(fieldByPath(codePath)));
   const name = (path === namePath ? value : liveValue(fieldByPath(namePath)) || "").trim();
   if (code && name && GOVERNORATES[code] && codeForGovName(name) !== code) return [MSG.govName];
+  const front = nidDigits(liveValue(fieldByPath("front.national_id")));
+  const back = nidDigits(liveValue(fieldByPath("back.national_id")));
+  const nid = front || back;
+  if (code.length === 2 && nid && nid.slice(7, 9) !== code) return [MSG.govNid];
   return [];
 }
 function nidPairError(path, value) {
@@ -177,6 +183,26 @@ function nidOk(value) {
   const year = (digits[0] === "2" ? 1900 : 2000) + Number(digits.slice(1, 3));
   return Boolean(parseIsoDate(`${year}-${digits.slice(3, 5)}-${digits.slice(5, 7)}`));
 }
+function nidBorn(value) {
+  const digits = digitsOnly(value);
+  if (!nidOk(value)) return null;
+  const year = (digits[0] === "2" ? 1900 : 2000) + Number(digits.slice(1, 3));
+  return parseIsoDate(`${year}-${digits.slice(3, 5)}-${digits.slice(5, 7)}`);
+}
+function ageYears(born) {
+  if (!born) return null;
+  const today = new Date();
+  let age = today.getFullYear() - born.getFullYear();
+  if ((today.getMonth() < born.getMonth()) || (today.getMonth() === born.getMonth() && today.getDate() < born.getDate())) age -= 1;
+  return age;
+}
+function liveNidAgeOk() {
+  const front = liveValue(fieldByPath("front.national_id"));
+  const back = liveValue(fieldByPath("back.national_id"));
+  const born = nidBorn(nidOk(front) ? front : back);
+  const age = ageYears(born);
+  return age == null || age >= 18;
+}
 function validateField(field, value, edited) {
   const text = (value || "").trim();
   if (!text) return field.required ? [MSG.required] : [];
@@ -186,12 +212,19 @@ function validateField(field, value, edited) {
   }
   if (field.kind === "nid") {
     const msgs = nidOk(text) ? [] : [MSG.nid];
+    const age = ageYears(nidBorn(text));
+    if (age != null && age < 18) msgs.push(MSG.age);
     return msgs.concat(nidPairError(field.path, text));
   }
   if (field.kind === "dob") {
     const parsed = parseFullDate(text);
     if (!parsed) return [MSG.dob];
-    return parsed > new Date() ? [MSG.date] : [];
+    if (parsed > new Date()) return [MSG.date];
+    if (field.path === "derived.date_of_birth") {
+      const age = ageYears(parsed);
+      if (age != null && age < 18) return [MSG.age];
+    }
+    return [];
   }
   if (field.kind === "expiry") {
     const parsed = parseFullDate(text);
@@ -259,7 +292,7 @@ function reviewReady() {
     const edited = Object.prototype.hasOwnProperty.call(corrections, field.path) || editingPath === field.path;
     return validateField(field, liveValue(field), edited).length === 0;
   });
-  return fieldsOk && (nidOk(front) || nidOk(back)) && nidsMatch();
+  return fieldsOk && (nidOk(front) || nidOk(back)) && nidsMatch() && liveNidAgeOk();
 }
 function escapeHtml(value) {
   return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
@@ -432,6 +465,11 @@ async function loadQueue() {
   const payload = await response.json();
   applications = payload.applications || [];
   renderQueue();
+  if (!current) return;
+  const summary = applications.find((item) => item.id === current.id);
+  if (summary && summary.status !== current.status) {
+    await openApplication(current.id);
+  }
 }
 
 async function openApplication(id) {

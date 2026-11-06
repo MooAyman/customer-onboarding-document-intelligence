@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import sqlite3
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -284,6 +288,7 @@ def test_unreadable_national_id_is_not_absent():
     front = extract_front(lines)
     assert front.national_id.status == FieldStatus.unreadable
     assert front.national_id.confidence is None
+    assert front.national_id.raw_ocr == "٢٩٩٠١٠١١٢٣٤"
 
 
 def _ok_image():
@@ -1199,6 +1204,23 @@ def _selfie_photo():
     return img
 
 
+def _split_id_pairs() -> list[tuple[Path, Path]]:
+    split = Path("National IDs") / "Front + Back" / "data1" / "Split"
+    if not split.is_dir():
+        return []
+    fronts: dict[str, Path] = {}
+    backs: dict[str, Path] = {}
+    for path in split.iterdir():
+        if path.suffix.lower() not in {".jpg", ".jpeg"}:
+            continue
+        key = path.name[1:]
+        if path.name.startswith("1"):
+            fronts[key] = path
+        elif path.name.startswith("2"):
+            backs[key] = path
+    return [(fronts[key], backs[key]) for key in sorted(fronts) if key in backs]
+
+
 def _usable_id_images():
     root = Path("National IDs")
     if not root.is_dir():
@@ -1278,7 +1300,7 @@ def test_real_id_pair_is_accepted_into_review(tmp_path):
         data={"customer_id": CUSTOMER_A},
     )
     assert created.status_code == 200, created.text
-    assert created.json()["status"] in {"pending_review", "approved"}
+    assert created.json()["status"] in {"pending_review", "approved", "rejected"}
     assert len(store.list_all()) == 1
     assert client.get("/v1/review/applications").json()["applications"][0]["id"] == created.json()["id"]
     duplicate = client.post(
@@ -1469,11 +1491,20 @@ def test_customer_and_reviewer_ui_status_confidence_and_governorates():
     assert "statusLine.textContent = message" in customer
     assert "if (app.status === \"pending_review\") startPoll(app.id)" in customer
     assert "Approved — you can continue" in customer
+    assert "submitBtn.disabled = !ready || resubmitting" in customer
+    assert "next-stage\").classList.add(\"hidden\")" in customer
     assert "function confidenceMarkup" in reviewer
     assert "detection ${detection}" in reviewer
     assert "الدقهلية" in reviewer
     assert "function codeForGovName" in reviewer
+    assert "Applicant must be at least 18 years old." in reviewer
+    assert "function liveNidAgeOk" in reviewer
+    assert "nidsMatch() && liveNidAgeOk()" in reviewer
+    assert "summary.status !== current.status" in reviewer
     assert "statusLine.classList.add(\"error\")" in customer
+    css = (root / "styles.css").read_text(encoding="utf-8")
+    assert "overflow-x: hidden" in css
+    assert "button.danger:not(:disabled):hover" in css
 
 
 def test_extracted_values_preserve_script_and_normalize_digits():
@@ -1669,3 +1700,543 @@ def test_concurrent_duplicate_images_create_one_application(monkeypatch, tmp_pat
     created = [item for item in results if item is not None]
     assert len(created) == 1
     assert len(store.list_all()) == 1
+
+
+def test_failed_automated_decision_is_rejected(monkeypatch, tmp_path):
+    from egyid import workflow as workflow_mod
+    from egyid.models import Decision
+    from egyid.workflow import status_from_automated
+
+    assert status_from_automated(Decision.failed.value) == "rejected"
+    assert status_from_automated(Decision.completed.value) == "approved"
+    assert status_from_automated(Decision.needs_review.value) == "pending_review"
+
+    client, _store = _workflow_client(tmp_path, monkeypatch, auto_approve=True)
+    real_process = workflow_mod.process_id_pair
+
+    def failed_process(*args, **kwargs):
+        result = real_process(*args, **kwargs)
+        result.decision = Decision.failed
+        result.reasons = ["usable_nid"]
+        return result
+
+    monkeypatch.setattr(workflow_mod, "process_id_pair", failed_process)
+    created = _submit(client)
+    assert created.status_code == 200
+    assert created.json()["status"] == "rejected"
+    assert created.json()["can_resubmit"] is False
+
+
+def test_gender_check_canonicalizes_without_rewriting_ocr():
+    front, back, derived = _ready_pair()
+    back.gender_printed = FieldValue.present("Female", 0.9)
+    checks, _derived, decision, reasons = run_checks(front, back, derived, _ok_image(), _ok_image())
+    names = {item.name: item.passed for item in checks}
+    assert names["printed_derived_gender_match"] is True
+    assert back.gender_printed.value == "Female"
+    assert derived.gender.value == "أنثى"
+    assert "printed_derived_gender_match" not in reasons
+    assert decision == Decision.completed
+
+
+def test_derive_from_nid_uses_first_valid_side():
+    front = FrontFields(national_id=FieldValue.present("12345678901234", 0.9))
+    back = BackFields(national_id=FieldValue.present("29901011234567", 0.9))
+    derived = derive_from_nid(front, back)
+    assert derived.date_of_birth.value == "1999-01-01"
+    assert derived.gender.value == "أنثى"
+
+
+def test_review_attaches_age_message_to_dob():
+    from egyid.review import MSG_AGE, build_review
+
+    extraction = _sample_extraction()
+    record, ok = build_review(
+        extraction,
+        {"front.national_id": "32001011234567", "back.national_id": "32001011234567"},
+    )
+    assert ok is False
+    dob = next(item for item in record["fields"] if item["id"] == "derived.date_of_birth")
+    assert MSG_AGE in dob["review_validation"]["messages"]
+
+
+def test_accept_claims_review_final_nids(monkeypatch, tmp_path):
+    from egyid import pipeline as pipeline_mod
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    pending = _submit(client).json()
+    app_id = pending["id"]
+    accepted = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={
+            "action": "accept",
+            "corrections": {
+                "front.national_id": "29812102123456",
+                "back.national_id": "29812102123456",
+                "back.gender_printed": "أنثى",
+            },
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert store.claimed_nids(app_id) == ["29812102123456"]
+    monkeypatch.setattr(pipeline_mod, "default_engine", lambda: StubEngine(FRONT_LINES_B, BACK_LINES_B))
+    blocked = _submit(client, customer_id=CUSTOMER_B, files=_png_pair(tag=3))
+    assert blocked.status_code == 409
+    assert "nid" in blocked.json()["duplicate"]
+
+
+def test_resubmit_keeps_nid_claim_when_ocr_misses(monkeypatch, tmp_path):
+    from egyid import workflow as workflow_mod
+    from egyid.nid import nids_from_extraction as real_nids
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    pending = _submit(client, files=_png_pair(tag=0)).json()
+    app_id = pending["id"]
+    assert "29901011234567" in store.claimed_nids(app_id)
+    asked = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={"action": "resubmit", "reason": "Please recapture both sides."},
+    )
+    assert asked.status_code == 200
+    monkeypatch.setattr(workflow_mod, "nids_from_extraction", lambda extraction: [])
+    again = _submit(client, f"/v1/applications/{app_id}/resubmit", files=_png_pair(tag=1))
+    assert again.status_code == 200
+    assert "29901011234567" in store.claimed_nids(app_id)
+    monkeypatch.setattr(workflow_mod, "nids_from_extraction", real_nids)
+    blocked = _submit(client, customer_id=CUSTOMER_B, files=_png_pair(tag=2))
+    assert blocked.status_code == 409
+    assert "nid" in blocked.json()["duplicate"]
+
+
+def test_resubmit_does_not_replace_images_when_duplicate_blocked(monkeypatch, tmp_path):
+    from pathlib import Path as PathType
+
+    from egyid import pipeline as pipeline_mod
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    first = _submit(client, files=_png_pair(tag=0)).json()
+    app_id = first["id"]
+    original = PathType(store.get(app_id)["front_path"]).read_bytes()
+    asked = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={"action": "resubmit", "reason": "Please recapture both sides."},
+    )
+    assert asked.status_code == 200
+    monkeypatch.setattr(pipeline_mod, "default_engine", lambda: StubEngine(FRONT_LINES_B, BACK_LINES_B))
+    second = _submit(client, customer_id=CUSTOMER_B, files=_png_pair(tag=1))
+    assert second.status_code == 200
+    blocked = _submit(client, f"/v1/applications/{app_id}/resubmit", files=_png_pair(tag=1))
+    assert blocked.status_code == 409
+    assert PathType(store.get(app_id)["front_path"]).read_bytes() == original
+    leftover = list((tmp_path / "uploads" / app_id).glob("*.tmp"))
+    assert leftover == []
+
+
+def test_resubmit_replaces_image_bytes_after_commit(monkeypatch, tmp_path):
+    from pathlib import Path as PathType
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    first = _submit(client, files=_png_pair(tag=0)).json()
+    app_id = first["id"]
+    original = PathType(store.get(app_id)["front_path"]).read_bytes()
+    asked = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={"action": "resubmit", "reason": "Please recapture both sides."},
+    )
+    assert asked.status_code == 200
+    replacement = _png_pair(tag=4)
+    again = _submit(client, f"/v1/applications/{app_id}/resubmit", files=replacement)
+    assert again.status_code == 200
+    stored = PathType(store.get(app_id)["front_path"]).read_bytes()
+    assert stored == replacement["front"][1]
+    assert stored != original
+    assert client.get(f"/v1/applications/{app_id}/front").content == stored
+
+
+def _prepare_resubmit(client, files=None):
+    first = _submit(client, files=files or _png_pair(tag=0)).json()
+    app_id = first["id"]
+    asked = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={"action": "resubmit", "reason": "Please recapture both sides."},
+    )
+    assert asked.status_code == 200
+    return app_id
+
+
+def _live_and_hash(store, app_id, side: str) -> tuple[bytes, str]:
+    rec = store.get(app_id)
+    live = Path(rec[f"{side}_path"]).read_bytes()
+    row = store._conn.execute(
+        "SELECT sha256 FROM application_images WHERE application_id = ? AND side = ?",
+        (app_id, side),
+    ).fetchone()
+    return live, row["sha256"]
+
+
+def _assert_originals_consistent(store, app_id, originals: dict[str, tuple[bytes, str]], tmp_path) -> None:
+    from egyid.store import sha256_hex
+
+    rec = store.get(app_id)
+    for side, (original, original_hash) in originals.items():
+        live, db_hash = _live_and_hash(store, app_id, side)
+        assert live == original
+        assert db_hash == original_hash
+        assert sha256_hex(live) == original_hash
+    folder = tmp_path / "uploads" / app_id
+    assert list(folder.glob("*.tmp")) == []
+    assert list(folder.glob("*.bak")) == []
+    assert rec["status"] == "resubmission_required"
+
+
+def test_resubmit_keeps_original_hashes_when_replace_fails(monkeypatch, tmp_path):
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    app_id = _prepare_resubmit(client)
+    originals = {side: _live_and_hash(store, app_id, side) for side in ("front", "back")}
+    store._backup_and_replace = lambda pairs: (_ for _ in ()).throw(OSError("injected replace failure"))
+    with pytest.raises(OSError, match="injected replace failure"):
+        _submit(client, f"/v1/applications/{app_id}/resubmit", files=_png_pair(tag=9))
+    _assert_originals_consistent(store, app_id, originals, tmp_path)
+
+
+def test_resubmit_restores_originals_when_second_replace_fails(monkeypatch, tmp_path):
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    app_id = _prepare_resubmit(client, files=_png_pair(tag=1))
+    originals = {side: _live_and_hash(store, app_id, side) for side in ("front", "back")}
+    rec = store.get(app_id)
+    back_dest = Path(rec["back_path"])
+    real_replace = os.replace
+
+    def flaky(src, dst):
+        src_path, dst_path = Path(src), Path(dst)
+        if dst_path == back_dest and src_path.name.endswith(".tmp"):
+            raise OSError("injected second-file replace failure")
+        real_replace(src, dst)
+
+    monkeypatch.setattr("egyid.store.os.replace", flaky)
+    with pytest.raises(OSError, match="injected second-file replace failure"):
+        _submit(client, f"/v1/applications/{app_id}/resubmit", files=_png_pair(tag=8))
+    _assert_originals_consistent(store, app_id, originals, tmp_path)
+
+
+def test_resubmit_restores_originals_when_commit_fails(monkeypatch, tmp_path):
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    app_id = _prepare_resubmit(client, files=_png_pair(tag=2))
+    originals = {side: _live_and_hash(store, app_id, side) for side in ("front", "back")}
+
+    class ConnProxy:
+        def __init__(self, inner):
+            object.__setattr__(self, "_inner", inner)
+            object.__setattr__(self, "fail_commit", False)
+
+        def commit(self):
+            if self.fail_commit:
+                raise sqlite3.DatabaseError("injected commit failure")
+            return self._inner.commit()
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    store._conn = ConnProxy(store._conn)
+    store._conn.fail_commit = True
+    with pytest.raises(sqlite3.DatabaseError, match="injected commit failure"):
+        _submit(client, f"/v1/applications/{app_id}/resubmit", files=_png_pair(tag=7))
+    _assert_originals_consistent(store, app_id, originals, tmp_path)
+
+
+def test_ocr_exception_goes_to_needs_review(monkeypatch, tmp_path):
+    from egyid import pipeline as pipeline_mod
+    from egyid.workflow import CUSTOMER_MESSAGES
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+
+    class BoomEngine:
+        def run(self, image):
+            raise RuntimeError("ocr engine crashed")
+
+    monkeypatch.setattr(pipeline_mod, "default_engine", lambda: BoomEngine())
+    created = _submit(client)
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["status"] == "pending_review"
+    assert body["automated_decision"] == "needs_review"
+    assert body["customer_message"] == CUSTOMER_MESSAGES["pending_review"]
+    assert "ocr engine crashed" not in str(body).lower()
+    rec = store.get(body["id"])
+    assert Path(rec["front_path"]).is_file()
+    assert Path(rec["back_path"]).is_file()
+    queue = client.get("/v1/review/applications").json()["applications"]
+    assert queue[0]["id"] == body["id"]
+    assert queue[0]["status"] == "pending_review"
+
+
+def test_ocr_exception_on_resubmit_goes_to_needs_review(monkeypatch, tmp_path):
+    from egyid import pipeline as pipeline_mod
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    app_id = _prepare_resubmit(client, files=_png_pair(tag=0))
+    replacement = _png_pair(tag=5)
+
+    class BoomEngine:
+        def run(self, image):
+            raise RuntimeError("ocr engine crashed")
+
+    monkeypatch.setattr(pipeline_mod, "default_engine", lambda: BoomEngine())
+    again = _submit(client, f"/v1/applications/{app_id}/resubmit", files=replacement)
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert body["id"] == app_id
+    assert body["status"] == "pending_review"
+    assert body["automated_decision"] == "needs_review"
+    assert "ocr engine crashed" not in str(body).lower()
+    assert Path(store.get(app_id)["front_path"]).read_bytes() == replacement["front"][1]
+
+
+def test_empty_ocr_without_exception_still_rejects(monkeypatch, tmp_path):
+    from egyid import pipeline as pipeline_mod
+
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(pipeline_mod, "default_engine", lambda: StubEngine([], []))
+    created = _submit(client)
+    assert created.status_code == 200
+    body = created.json()
+    assert body["status"] == "rejected"
+    assert body["automated_decision"] == "failed"
+    assert store.get(body["id"])["status"] == "rejected"
+
+
+def test_stale_accept_returns_conflict(monkeypatch, tmp_path):
+    client, _store = _workflow_client(tmp_path, monkeypatch)
+    pending = _submit(client).json()
+    app_id = pending["id"]
+    first = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={"action": "accept", "corrections": {"back.gender_printed": "أنثى"}},
+    )
+    assert first.status_code == 200, first.text
+    second = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={"action": "reject", "reason": "Too late."},
+    )
+    assert second.status_code == 409
+    assert client.get(f"/v1/applications/{app_id}").json()["status"] == "approved"
+
+
+def _wait_health(base: str, timeout: float = 20) -> None:
+    import urllib.error
+    import urllib.request
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(base + "/health", timeout=1) as response:
+                if response.status == 200:
+                    return
+        except (urllib.error.URLError, TimeoutError, OSError):
+            time.sleep(0.25)
+    raise AssertionError("server did not become healthy")
+
+
+def test_playwright_real_id_browser_flow(tmp_path):
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    pairs = _split_id_pairs()
+    if len(pairs) < 2:
+        pytest.skip("local National ID image pairs are not available")
+    front_a, back_a = pairs[0]
+    front_b, back_b = pairs[1]
+    bytes_a = front_a.read_bytes()
+    bytes_b = front_b.read_bytes()
+    db_path = tmp_path / "egyid.sqlite"
+    upload_dir = tmp_path / "uploads"
+    port = 8011
+    base = f"http://127.0.0.1:{port}"
+    launcher = tmp_path / "serve.py"
+    launcher.write_text(
+        "from pathlib import Path\n"
+        "import os\n"
+        "import uvicorn\n"
+        "from egyid.api import create_app\n"
+        "from egyid.store import Store\n"
+        "uvicorn.run(\n"
+        "    create_app(store=Store(Path(os.environ['EGYID_DB']), Path(os.environ['EGYID_UPLOADS']))),\n"
+        "    host='127.0.0.1',\n"
+        f"    port={port},\n"
+        "    log_level='warning',\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path("src").resolve()),
+        "EGYID_DB": str(db_path),
+        "EGYID_UPLOADS": str(upload_dir),
+    }
+    proc = subprocess.Popen(
+        [sys.executable, str(launcher)],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    evidence: dict[str, str] = {}
+    try:
+        _wait_health(base)
+
+        def restart():
+            nonlocal proc
+            proc.terminate()
+            try:
+                proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            proc = subprocess.Popen(
+                [sys.executable, str(launcher)],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            _wait_health(base)
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            page.goto(base + "/")
+            page.set_input_files("#front-file", str(front_a.resolve()))
+            page.set_input_files("#back-file", str(back_a.resolve()))
+            page.click("#submit")
+            page.wait_for_function(
+                "() => document.getElementById('status-panel') && !document.getElementById('status-panel').classList.contains('hidden')",
+                timeout=120000,
+            )
+            status_a = page.locator("#status-banner strong").inner_text()
+            evidence["first_submit"] = status_a
+            app_a = page.locator("#app-id-line").inner_text().replace("Application ", "").strip()
+            assert app_a
+
+            page.click("#submit")
+            page.wait_for_function(
+                "() => document.getElementById('status-line').classList.contains('error')",
+                timeout=30000,
+            )
+            dup_text = page.locator("#status-line").inner_text().lower()
+            evidence["duplicate"] = "front image" in dup_text or "national id" in dup_text
+            assert evidence["duplicate"]
+
+            page.set_input_files("#front-file", str(front_b.resolve()))
+            page.set_input_files("#back-file", str(back_b.resolve()))
+            page.click("#submit")
+            page.wait_for_function(
+                f"() => document.getElementById('app-id-line') && document.getElementById('app-id-line').textContent && !document.getElementById('app-id-line').textContent.includes('{app_a}')",
+                timeout=120000,
+            )
+            status_b = page.locator("#status-banner strong").inner_text()
+            evidence["second_submit"] = status_b
+            app_b = page.locator("#app-id-line").inner_text().replace("Application ", "").strip()
+            assert app_b and app_b != app_a
+
+            page.goto(base + "/review")
+            page.wait_for_selector(f"[data-id='{app_a}']", timeout=15000)
+            page.click(f"[data-id='{app_a}']")
+            page.wait_for_selector("#decision-reason")
+            page.fill("#decision-reason", "Need a clearer expiry date.")
+            page.click("#resubmit")
+            page.wait_for_function(
+                "() => document.getElementById('status-line').textContent.includes('Decision saved')",
+                timeout=15000,
+            )
+
+            page.goto(base + "/")
+            page.click(f"[data-id='{app_a}']")
+            page.wait_for_function(
+                "() => document.getElementById('resubmit-box') && !document.getElementById('resubmit-box').classList.contains('hidden')",
+                timeout=15000,
+            )
+            assert page.locator("#submit").is_disabled()
+            page.set_input_files("#front-file", str(front_b.resolve()))
+            page.set_input_files("#back-file", str(back_b.resolve()))
+            page.click("#resubmit")
+            page.wait_for_function(
+                "() => document.getElementById('status-line').classList.contains('error')",
+                timeout=30000,
+            )
+            import urllib.request
+
+            with urllib.request.urlopen(base + f"/v1/applications/{app_a}/front") as response:
+                still_a = response.read()
+            evidence["resubmit_blocked_keeps_bytes"] = still_a == bytes_a
+            assert still_a == bytes_a
+
+            page.set_input_files("#front-file", str(front_a.resolve()))
+            page.set_input_files("#back-file", str(back_a.resolve()))
+            page.click("#resubmit")
+            page.wait_for_function(
+                "() => document.getElementById('resubmit-box').classList.contains('hidden')",
+                timeout=120000,
+            )
+
+            page.goto(base + "/review")
+            page.click(f"[data-id='{app_a}']")
+            page.wait_for_selector("[data-edit='back.expiry_date']")
+            if page.locator("#accept").is_disabled():
+                page.click("[data-edit='back.expiry_date']")
+                page.fill("#edit-input", "2030/05/17")
+                page.click("#edit-apply")
+            page.wait_for_function(
+                "() => !document.getElementById('accept').disabled",
+                timeout=10000,
+            )
+            page.click("#accept")
+            page.wait_for_function(
+                "() => document.getElementById('status-line').textContent.includes('Decision saved') || document.getElementById('status-line').textContent.includes('review')",
+                timeout=15000,
+            )
+            accept_line = page.locator("#status-line").inner_text()
+            evidence["accept_ui"] = accept_line
+            import json as json_lib
+            import urllib.request
+
+            with urllib.request.urlopen(base + f"/v1/applications/{app_a}") as response:
+                server_a = json_lib.loads(response.read().decode("utf-8"))
+            evidence["accept_server_status"] = server_a["status"]
+            if "Decision saved" in accept_line:
+                assert server_a["status"] == "approved"
+
+            shots = Path("artifacts") / "browser_evidence"
+            shots.mkdir(parents=True, exist_ok=True)
+            page.goto(base + "/")
+            page.click(f"[data-id='{app_a}']")
+            page.wait_for_selector("#status-banner")
+            page.evaluate(
+                "() => document.querySelectorAll('#front-preview, #back-preview, img').forEach((el) => el.remove())"
+            )
+            page.locator("#status-panel").screenshot(path=str(shots / "customer-status.png"))
+            evidence["screenshot"] = str(shots / "customer-status.png")
+            browser.close()
+
+        import urllib.request
+
+        with urllib.request.urlopen(base + f"/v1/applications/{app_a}/front") as response:
+            before = response.read()
+        with urllib.request.urlopen(base + f"/v1/applications/{app_b}/front") as response:
+            before_b = response.read()
+        restart()
+        with urllib.request.urlopen(base + f"/v1/applications/{app_a}/front") as response:
+            after = response.read()
+        with urllib.request.urlopen(base + f"/v1/applications/{app_b}/front") as response:
+            after_b = response.read()
+        evidence["restart_a"] = after == before == bytes_a
+        evidence["restart_b"] = after_b == before_b == bytes_b
+        assert after == before == bytes_a
+        assert after_b == before_b == bytes_b
+        assert evidence["resubmit_blocked_keeps_bytes"]
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)

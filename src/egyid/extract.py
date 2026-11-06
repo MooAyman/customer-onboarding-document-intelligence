@@ -116,7 +116,7 @@ def _best_nid(lines: list[OcrLine], prefer_cy: tuple[float, float] | None = None
         loose = [line for line in lines if 10 <= len(digits_only(line.text)) <= 16]
         if loose:
             best = max(loose, key=lambda item: item.score)
-            return FieldValue.unreadable()
+            return FieldValue.unreadable(raw_ocr=best.text)
         return FieldValue.absent()
 
     def rank(item: tuple[OcrLine, str]) -> float:
@@ -132,7 +132,7 @@ def _best_nid(lines: list[OcrLine], prefer_cy: tuple[float, float] | None = None
     line, digits = max(matches, key=rank)
     parsed = parse_national_id(digits)
     if parsed is None or not parsed.ok:
-        return FieldValue.unreadable()
+        return FieldValue.unreadable(raw_ocr=line.text)
     return FieldValue.present(parsed.raw, line.score, raw_ocr=line.text)
 
 

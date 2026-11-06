@@ -27,11 +27,26 @@ from egyid.imaging import (
     to_image_validation,
 )
 from egyid.logging_utils import get_logger
-from egyid.models import FieldSource, FieldValue, IdDocumentResult
+from egyid.models import (
+    BackFields,
+    CheckResult,
+    Decision,
+    DerivedFields,
+    FieldSource,
+    FieldValue,
+    FrontFields,
+    ImageValidation,
+    IdDocumentResult,
+    Severity,
+)
 from egyid.ocr import OcrEngine, default_engine
 from egyid.validate import derive_from_nid, run_checks
 
 logger = get_logger(__name__)
+
+
+class OcrEngineError(RuntimeError):
+    """OCR engine raised; the application should go to human review."""
 
 
 def process_id_pair(
@@ -54,50 +69,54 @@ def process_id_pair(
     front_image = to_image_validation(front_loaded, front_quality)
     back_image = to_image_validation(back_loaded, back_quality)
 
-    front_fields = extract_front(_ocr_or_empty(ocr, front_loaded.array, ocr_ms, "front") if front_loaded.ok else [])
-    back_lines = _ocr_or_empty(ocr, back_loaded.array, ocr_ms, "back") if back_loaded.ok else []
-    barcode_ok, barcode_score = (
-        barcode_present(back_loaded.array) if back_loaded.ok else (False, 0.0)
-    )
-    back_fields = extract_back(back_lines, barcode_ok, barcode_score)
-    if back_loaded.ok:
-        gender_lines = _ocr_or_empty(
-            ocr, crop_normalized(back_loaded.array, GENDER_CROP), ocr_ms, "back_gender"
+    try:
+        front_fields = extract_front(_ocr_or_empty(ocr, front_loaded.array, ocr_ms, "front") if front_loaded.ok else [])
+        back_lines = _ocr_or_empty(ocr, back_loaded.array, ocr_ms, "back") if back_loaded.ok else []
+        barcode_ok, barcode_score = (
+            barcode_present(back_loaded.array) if back_loaded.ok else (False, 0.0)
         )
-        religion_lines = _ocr_or_empty(
-            ocr, crop_normalized(back_loaded.array, RELIGION_CROP), ocr_ms, "back_religion"
-        )
-        back_fields.gender_printed = merge_present(
-            extract_mapped_keyword(gender_lines, GENDER_MAP, unread_if_text=True),
-            back_fields.gender_printed,
-        )
-        back_fields.religion_printed = merge_present(
-            extract_mapped_keyword(religion_lines, RELIGION_VALUES, unread_if_text=True),
-            back_fields.religion_printed,
-        )
-        expiry_lines = _ocr_or_empty(
-            ocr, crop_normalized(back_loaded.array, EXPIRY_CROP), ocr_ms, "back_expiry"
-        )
-        crop_expiry = with_extraction_trace(
-            extract_expiry_date(expiry_lines),
-            "crop",
-            " ".join(ln.text for ln in expiry_lines) or None,
-        )
-        full_expiry = with_extraction_trace(back_fields.expiry_date, "full_image")
-        back_fields.expiry_date = merge_present(crop_expiry, full_expiry)
+        back_fields = extract_back(back_lines, barcode_ok, barcode_score)
+        if back_loaded.ok:
+            gender_lines = _ocr_or_empty(
+                ocr, crop_normalized(back_loaded.array, GENDER_CROP), ocr_ms, "back_gender"
+            )
+            religion_lines = _ocr_or_empty(
+                ocr, crop_normalized(back_loaded.array, RELIGION_CROP), ocr_ms, "back_religion"
+            )
+            back_fields.gender_printed = merge_present(
+                extract_mapped_keyword(gender_lines, GENDER_MAP, unread_if_text=True),
+                back_fields.gender_printed,
+            )
+            back_fields.religion_printed = merge_present(
+                extract_mapped_keyword(religion_lines, RELIGION_VALUES, unread_if_text=True),
+                back_fields.religion_printed,
+            )
+            expiry_lines = _ocr_or_empty(
+                ocr, crop_normalized(back_loaded.array, EXPIRY_CROP), ocr_ms, "back_expiry"
+            )
+            crop_expiry = with_extraction_trace(
+                extract_expiry_date(expiry_lines),
+                "crop",
+                " ".join(ln.text for ln in expiry_lines) or None,
+            )
+            full_expiry = with_extraction_trace(back_fields.expiry_date, "full_image")
+            back_fields.expiry_date = merge_present(crop_expiry, full_expiry)
 
-    if front_loaded.ok:
-        portrait_ok, portrait_score = portrait_present(front_loaded.array)
-        front_fields.portrait_present = (
-            FieldValue.present("true", portrait_score, FieldSource.visual)
-            if portrait_ok
-            else FieldValue.unreadable(portrait_score, FieldSource.visual)
-        )
+        if front_loaded.ok:
+            portrait_ok, portrait_score = portrait_present(front_loaded.array)
+            front_fields.portrait_present = (
+                FieldValue.present("true", portrait_score, FieldSource.visual)
+                if portrait_ok
+                else FieldValue.unreadable(portrait_score, FieldSource.visual)
+            )
 
-    derived = derive_from_nid(front_fields, back_fields)
-    checks, derived, decision, reasons = run_checks(
-        front_fields, back_fields, derived, front_image, back_image, today=today
-    )
+        derived = derive_from_nid(front_fields, back_fields)
+        checks, derived, decision, reasons = run_checks(
+            front_fields, back_fields, derived, front_image, back_image, today=today
+        )
+    except OcrEngineError:
+        logger.exception("OCR engine failed; routing application to human review")
+        return _ocr_unavailable_result(front_image, back_image, ocr_ms)
 
     logger.info("pipeline decision=%s reasons=%s", decision.value, ",".join(reasons) or "none")
     return IdDocumentResult(
@@ -113,14 +132,37 @@ def process_id_pair(
     )
 
 
+def _ocr_unavailable_result(
+    front_image: ImageValidation, back_image: ImageValidation, ocr_ms: dict[str, int]
+) -> IdDocumentResult:
+    return IdDocumentResult(
+        decision=Decision.needs_review,
+        reasons=["ocr_engine_error"],
+        front_image=front_image,
+        back_image=back_image,
+        front=FrontFields(),
+        back=BackFields(),
+        derived=DerivedFields(),
+        checks=[
+            CheckResult(
+                name="ocr_engine_error",
+                passed=False,
+                severity=Severity.warning,
+                detail="Text recognition failed. A reviewer will check the images.",
+            )
+        ],
+        ocr_ms=ocr_ms,
+    )
+
+
 def _ocr_or_empty(
     engine: OcrEngine, image: np.ndarray, timings: dict[str, int], label: str
 ) -> list:
     started = time.perf_counter()
     try:
-        lines = engine.run(image)
-    except Exception:
+        return engine.run(image)
+    except Exception as exc:
         logger.exception("ocr failed on %s image", label)
-        lines = []
-    timings[label] = int((time.perf_counter() - started) * 1000)
-    return lines
+        raise OcrEngineError(f"ocr failed on {label}") from exc
+    finally:
+        timings[label] = int((time.perf_counter() - started) * 1000)

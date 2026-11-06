@@ -33,6 +33,7 @@ MSG_EXPIRED = "Expired must be true if the expiry date is in the past, and false
 MSG_GOV_CODE = "Governorate code must be a valid two-digit Egyptian NID code."
 MSG_GOV_NAME = "Governorate name must match the governorate code."
 MSG_GOV_NID = "Governorate must match the National ID."
+MSG_AGE = "Applicant must be at least 18 years old."
 PRESENCE_VALUES = ("true", "false")
 HINT_FULL_DOB = "YYYY/MM/DD e.g. 1999/01/15"
 HINT_FULL_EXPIRY = "YYYY/MM/DD e.g. 2030/05/17"
@@ -387,6 +388,14 @@ def build_review(
         age = _age_years(born, today)
         age_ok = age >= MIN_AGE
         age_detail = f"derived age {age}"
+        if not age_ok:
+            dob_messages = list(by_id["derived.date_of_birth"]["review_validation"]["messages"])
+            if MSG_AGE not in dob_messages:
+                dob_messages.append(MSG_AGE)
+            by_id["derived.date_of_birth"]["review_validation"] = {
+                "ok": False,
+                "messages": dob_messages,
+            }
 
     if not usable:
         for path in ("front.national_id", "back.national_id"):
