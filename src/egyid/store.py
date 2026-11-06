@@ -91,6 +91,12 @@ class Store:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(applications)")}
         if "customer_id" not in columns:
             self._conn.execute("ALTER TABLE applications ADD COLUMN customer_id TEXT")
+        if "form_json" not in columns:
+            self._conn.execute("ALTER TABLE applications ADD COLUMN form_json TEXT")
+        if "form_path" not in columns:
+            self._conn.execute("ALTER TABLE applications ADD COLUMN form_path TEXT")
+        if "form_status" not in columns:
+            self._conn.execute("ALTER TABLE applications ADD COLUMN form_status TEXT")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_applications_customer ON applications(customer_id)"
         )
@@ -267,18 +273,38 @@ class Store:
         for tmp, dest in pairs:
             os.replace(tmp, dest)
 
-    def _backup_and_replace(self, pairs: list[tuple[Path, Path]]) -> list[tuple[Path, Path]]:
+    def form_paths(self, application_id: str) -> list[Path]:
+        folder = self.upload_dir / application_id
+        if not folder.is_dir():
+            return []
+        found: list[Path] = []
+        for path in folder.iterdir():
+            if not path.is_file():
+                continue
+            name = path.name
+            if name.startswith("form") and not name.endswith(".tmp") and not name.endswith(".bak"):
+                found.append(path)
+        return found
+
+    def _backup_and_replace(
+        self, pairs: list[tuple[Path, Path]]
+    ) -> tuple[list[tuple[Path, Path]], list[Path]]:
         backups: list[tuple[Path, Path]] = []
+        created: list[Path] = []
         try:
             for tmp, dest in pairs:
-                if dest.is_file():
+                existed = dest.is_file()
+                if existed:
                     bak = dest.with_name(dest.name + ".bak")
                     os.replace(dest, bak)
                     backups.append((bak, dest))
                 os.replace(tmp, dest)
-            return backups
+                if not existed:
+                    created.append(dest)
+            return backups, created
         except Exception:
             self._restore_backups(backups)
+            self.discard_files(created)
             raise
 
     def _restore_backups(self, backups: list[tuple[Path, Path]]) -> None:
@@ -363,6 +389,7 @@ class Store:
         **fields: Any,
     ) -> dict[str, Any]:
         expected_status = fields.pop("expected_status", None)
+        expected_form_status = fields.pop("expected_form_status", None)
         replace_pairs = fields.pop("replace_pairs", None)
         mapping = {
             "status": "status",
@@ -382,15 +409,18 @@ class Store:
             "reviewer_reason": "reviewer_reason",
             "customer_message": "customer_message",
             "customer_id": "customer_id",
+            "form": "form_json",
+            "form_path": "form_path",
+            "form_status": "form_status",
         }
         assignments = ["updated_at = ?"]
         values: list[Any] = [_now()]
-        json_keys = {"extraction", "corrections", "review", "automated_reasons"}
+        json_keys = {"extraction", "corrections", "review", "automated_reasons", "form"}
         for key, column in mapping.items():
             if key not in fields:
                 continue
             value = fields[key]
-            if key in {"front_path", "back_path"} and value is not None:
+            if key in {"front_path", "back_path", "form_path"} and value is not None:
                 value = str(value)
             if key in json_keys:
                 value = _dump(value)
@@ -399,6 +429,7 @@ class Store:
         values.append(application_id)
         claimed = None if nids is None else self._unique_nids(nids)
         backups: list[tuple[Path, Path]] = []
+        created: list[Path] = []
         with self._lock:
             try:
                 if claimed is not None or images is not None:
@@ -410,19 +441,30 @@ class Store:
                 if expected_status is not None:
                     sql += " AND status = ?"
                     params.append(expected_status)
+                if expected_form_status is not None:
+                    sql += " AND form_status = ?"
+                    params.append(expected_form_status)
                 cursor = self._conn.execute(sql, params)
-                if expected_status is not None and cursor.rowcount == 0:
+                if (
+                    (expected_status is not None or expected_form_status is not None)
+                    and cursor.rowcount == 0
+                ):
                     self._conn.rollback()
-                    raise PermissionError("application is not pending review")
+                    raise PermissionError(
+                        "application form is not pending review"
+                        if expected_form_status is not None
+                        else "application is not pending review"
+                    )
                 if claimed is not None:
                     self._put_nids(application_id, claimed)
                 if images is not None:
                     self._put_images(application_id, images)
                 if replace_pairs:
-                    backups = self._backup_and_replace(replace_pairs)
+                    backups, created = self._backup_and_replace(replace_pairs)
                 self._conn.commit()
             except Exception:
                 self._restore_backups(backups)
+                self.discard_files(created)
                 self._conn.rollback()
                 raise
             else:
@@ -474,6 +516,9 @@ class Store:
             "reviewer_reason": row["reviewer_reason"],
             "customer_message": row["customer_message"],
             "customer_id": row["customer_id"] if "customer_id" in row.keys() else None,
+            "form": _load(row["form_json"]) if "form_json" in row.keys() else None,
+            "form_path": row["form_path"] if "form_path" in row.keys() else None,
+            "form_status": row["form_status"] if "form_status" in row.keys() else None,
         }
 
     def list_for_customer(self, customer_id: str) -> list[dict[str, Any]]:

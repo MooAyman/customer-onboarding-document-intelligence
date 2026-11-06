@@ -75,16 +75,29 @@ const RELIGION = ["مسلم", "مسلمة", "مسيحي", "مسيحية", "يه�
 const MARITAL_AR = ["أعزب", "اعزب", "عزباء", "متزوج", "متزوجة", "مطلق", "مطلقة", "أرمل", "ارمل", "أرملة", "ارملة"];
 const PENCIL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 
+const FORM_FIELDS = [
+  { id: "full_name", label: "Full name" },
+  { id: "national_id", label: "National ID" },
+  { id: "gender", label: "Gender" },
+  { id: "mobile", label: "Mobile" },
+  { id: "speed", label: "Speed" },
+];
 const acceptBtn = document.getElementById("accept");
 const rejectBtn = document.getElementById("reject");
 const resubmitBtn = document.getElementById("resubmit");
+const formAcceptBtn = document.getElementById("form-accept");
+const formRejectBtn = document.getElementById("form-reject");
+const formResubmitBtn = document.getElementById("form-resubmit");
 const statusLine = document.getElementById("status-line");
 const reasonBox = document.getElementById("decision-reason");
+const formReasonBox = document.getElementById("form-decision-reason");
 let applications = [];
 let current = null;
 let lastResult = null;
 let corrections = {};
+let formCorrections = {};
 let editingPath = null;
+let formEditing = null;
 let localMessages = {};
 
 function lookup(obj, path) {
@@ -324,13 +337,17 @@ function autoClass(decision) {
   return { completed: "completed", failed: "failed", needs_review: "needs_review" }[decision] || "needs_review";
 }
 
+function formPending(item) {
+  return (item && item.form_status) === "pending_review" || (item && item.form && item.form.status === "pending_review");
+}
+
 function renderQueue() {
   const root = document.getElementById("queue");
-  const pending = applications.filter((item) => item.status === "pending_review").length;
+  const pending = applications.filter((item) => item.status === "pending_review" || formPending(item)).length;
   document.getElementById("queue-summary").textContent = `${applications.length} total · ${pending} pending review`;
   root.innerHTML = applications
-    .map((item) => `<button type="button" class="queue-item ${autoClass(item.status === "approved" ? "completed" : item.status === "rejected" ? "failed" : "needs_review")}${current && current.id === item.id ? " active" : ""}" data-id="${item.id}">
-      <strong>${item.status}</strong>
+    .map((item) => `<button type="button" class="queue-item ${autoClass(item.status === "approved" && !formPending(item) ? "completed" : item.status === "rejected" ? "failed" : "needs_review")}${current && current.id === item.id ? " active" : ""}" data-id="${item.id}">
+      <strong>${item.status}${formPending(item) ? " · form review" : ""}</strong>
       <span>${escapeHtml(item.applicant_name || "Unnamed")} · ${item.automated_decision || ""}</span>
     </button>`)
     .join("") || "<p class='lede'>No applications yet.</p>";
@@ -443,6 +460,86 @@ function setPreview(id, url) {
   box.innerHTML = `<img alt="${id}" src="${url}" />`;
 }
 
+function formFieldValue(fieldId) {
+  if (Object.prototype.hasOwnProperty.call(formCorrections, fieldId)) return formCorrections[fieldId];
+  const field = current && current.form && current.form.fields ? current.form.fields[fieldId] : null;
+  return field && field.value != null ? String(field.value) : "";
+}
+
+function renderFormReview() {
+  const panel = document.getElementById("form-review");
+  const decision = document.getElementById("form-decision");
+  const form = current && current.form;
+  if (!form) {
+    panel.classList.add("hidden");
+    decision.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  decision.classList.remove("hidden");
+  const pending = form.status === "pending_review";
+  document.getElementById("form-review-summary").textContent = pending
+    ? "Correct extracted values if needed, then accept, reject, or request a new form."
+    : `This application form is ${form.status}.`;
+  document.getElementById("form-decision-summary").textContent = pending
+    ? "The National ID decision stays unchanged."
+    : `Form status: ${form.status}.`;
+  const preview = document.getElementById("form-preview");
+  if (current.form_url) {
+    preview.classList.remove("empty");
+    preview.innerHTML = `<iframe title="application form" src="${current.form_url}"></iframe>`;
+  } else {
+    preview.classList.add("empty");
+    preview.textContent = "No form file";
+  }
+  const flags = (form.review_flags || []).map((item) => escapeHtml(item)).join(", ");
+  document.getElementById("form-flags").textContent = flags ? `Review flags: ${form.review_flags.join(", ")}` : "No review flags.";
+  const body = document.getElementById("form-fields");
+  body.innerHTML = "";
+  FORM_FIELDS.forEach((spec) => {
+    const data = (form.fields || {})[spec.id] || {};
+    const edited = Object.prototype.hasOwnProperty.call(formCorrections, spec.id);
+    const shown = formFieldValue(spec.id);
+    const row = document.createElement("tr");
+    if ((form.review_flags || []).some((flag) => flag.startsWith(spec.id.replace("full_name", "name")))) row.className = "flag";
+    row.innerHTML = `
+      <td>${escapeHtml(spec.label)}${edited ? ' <span class="badge present">corrected</span>' : ""}</td>
+      <td class="value"${/[\u0600-\u06FF]/.test(shown) ? ' dir="rtl"' : ""}>${escapeHtml(shown) || "—"}${data.confidence != null ? `<span class="confidence">${Math.round(Number(data.confidence) * 100)}%</span>` : ""}</td>
+      <td><span class="badge ${data.status || "absent"}">${data.status || "absent"}</span></td>
+      <td>${pending ? `<button class="icon-edit" type="button" data-form-edit="${spec.id}" aria-label="Edit ${spec.label}">${PENCIL}</button>` : ""}</td>`;
+    body.appendChild(row);
+    if (formEditing === spec.id) {
+      const editor = document.createElement("tr");
+      editor.className = "editor";
+      editor.innerHTML = `<td colspan="4"><div class="editor-row"><input class="review" id="form-edit-input" dir="auto" autocomplete="off" /><button type="button" id="form-edit-apply">Apply</button><button type="button" id="form-edit-cancel">Cancel</button></div></td>`;
+      body.appendChild(editor);
+      const input = editor.querySelector("#form-edit-input");
+      input.value = shown;
+      input.focus();
+      editor.querySelector("#form-edit-apply").addEventListener("click", () => {
+        const next = input.value.trim();
+        if (next) formCorrections[spec.id] = next;
+        else delete formCorrections[spec.id];
+        formEditing = null;
+        refreshDetail();
+      });
+      editor.querySelector("#form-edit-cancel").addEventListener("click", () => {
+        formEditing = null;
+        refreshDetail();
+      });
+    }
+  });
+  body.querySelectorAll("[data-form-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      formEditing = button.getAttribute("data-form-edit");
+      refreshDetail();
+    });
+  });
+  formAcceptBtn.disabled = !pending;
+  formRejectBtn.disabled = !pending;
+  formResubmitBtn.disabled = !pending;
+}
+
 function refreshDetail() {
   if (!current || !lastResult) return;
   document.getElementById("detail").classList.remove("hidden");
@@ -451,6 +548,7 @@ function refreshDetail() {
   renderBanners();
   renderFields();
   renderChecks();
+  renderFormReview();
   const pending = current.status === "pending_review";
   acceptBtn.disabled = !(pending && reviewReady());
   rejectBtn.disabled = !pending;
@@ -467,7 +565,7 @@ async function loadQueue() {
   renderQueue();
   if (!current) return;
   const summary = applications.find((item) => item.id === current.id);
-  if (summary && summary.status !== current.status) {
+  if (summary && (summary.status !== current.status || summary.form_status !== current.form_status)) {
     await openApplication(current.id);
   }
 }
@@ -478,9 +576,12 @@ async function openApplication(id) {
   current = await response.json();
   lastResult = current.extraction;
   corrections = { ...(current.corrections || {}) };
+  formCorrections = { ...((current.form && current.form.corrections) || {}) };
   editingPath = null;
+  formEditing = null;
   localMessages = {};
   reasonBox.value = current.reviewer_reason || "";
+  formReasonBox.value = (current.form && current.form.reviewer_reason) || "";
   refreshDetail();
   renderQueue();
 }
@@ -518,8 +619,34 @@ async function decide(action) {
   await openApplication(current.id);
 }
 
+async function decideForm(action) {
+  if (!current || !current.form) return;
+  const reason = formReasonBox.value.trim();
+  if ((action === "reject" || action === "resubmit") && !reason) {
+    statusLine.textContent = "Enter a reason for the form decision.";
+    return;
+  }
+  statusLine.textContent = "Saving form decision…";
+  const response = await fetch(`/v1/review/applications/${current.id}/form/decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, corrections: formCorrections, reason }),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    statusLine.textContent = payload.detail || "Form decision was not saved.";
+    return;
+  }
+  statusLine.textContent = "Form decision saved. The customer portal will show this status.";
+  await loadQueue();
+  await openApplication(current.id);
+}
+
 acceptBtn.addEventListener("click", () => decide("accept"));
 rejectBtn.addEventListener("click", () => decide("reject"));
 resubmitBtn.addEventListener("click", () => decide("resubmit"));
+formAcceptBtn.addEventListener("click", () => decideForm("accept"));
+formRejectBtn.addEventListener("click", () => decideForm("reject"));
+formResubmitBtn.addEventListener("click", () => decideForm("resubmit"));
 loadQueue();
 setInterval(loadQueue, 5000);

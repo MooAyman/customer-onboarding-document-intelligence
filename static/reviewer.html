@@ -47,6 +47,23 @@
             <h2>Extracted record</h2>
             <p class="lede">Original OCR stays visible. Use the pencil only when the card shows a different value.</p>
             <div id="field-groups"></div>
+            <div id="form-review" class="group hidden">
+              <h3>Application form</h3>
+              <p class="lede" id="form-review-summary">No form submitted.</p>
+              <div class="preview form-preview empty" id="form-preview">No form file</div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Value</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="form-fields"></tbody>
+              </table>
+              <p class="meta" id="form-flags"></p>
+            </div>
           </section>
           <aside>
             <h2>Decision</h2>
@@ -60,6 +77,19 @@
               <button id="accept" type="button" disabled>Accept</button>
               <button id="reject" type="button" class="danger" disabled>Reject</button>
               <button id="resubmit" type="button" class="warn" disabled>Request resubmission</button>
+            </div>
+            <div id="form-decision" class="hidden">
+              <h2>Application form decision</h2>
+              <p class="lede" id="form-decision-summary">Review extracted form fields independently of the National ID decision.</p>
+              <label class="reason-box">
+                <span>Reason for form reject or resubmission</span>
+                <textarea id="form-decision-reason" rows="3"></textarea>
+              </label>
+              <div class="decision-actions">
+                <button id="form-accept" type="button" disabled>Accept form</button>
+                <button id="form-reject" type="button" class="danger" disabled>Reject form</button>
+                <button id="form-resubmit" type="button" class="warn" disabled>Request form resubmission</button>
+              </div>
             </div>
             <p class="hint" id="status-line"></p>
             <h2 class="later">Automated checks</h2>

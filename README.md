@@ -6,7 +6,7 @@ Upload the front and back of a national ID. The pipeline reads Arabic print with
 
 Built for telecom-style customer onboarding: fast intake, explainable decisions, and an auditable review path.
 
-FastAPI · RapidOCR · OpenCV · Pydantic · SQLite · Human-in-the-loop
+FastAPI · RapidOCR · Azure Document Intelligence · OpenCV · Pydantic · SQLite · Human-in-the-loop
 
 ---
 
@@ -66,6 +66,7 @@ OCR output is the system of record. Reviewer edits live in `corrections`, so ext
 | Customer intake | http://127.0.0.1:8000/ |
 | Reviewer console | http://127.0.0.1:8000/review |
 | Health | http://127.0.0.1:8000/health |
+| Form layout (`prebuilt-layout`) | `POST /v1/forms/layout` |
 
 The customer UI submits a front/back pair and tracks application status. The reviewer UI opens the case, inspects both images, applies corrections, and records accept, reject, or resubmission.
 
@@ -106,7 +107,24 @@ Field values are redacted by default. Pass `--show-values` to print the extracte
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The suite covers NID decoding, extraction geometry, classification, validation policy, duplicate and resubmit flows, review gates, and API contracts — including optional real-OCR and Playwright paths when local ID samples are present.
+The suite covers NID decoding, extraction geometry, classification, validation policy, duplicate and resubmit flows, review gates, API contracts, and mocked Azure layout analysis — including optional real-OCR and Playwright paths when local ID samples are present.
+
+## Application form layout (Azure)
+
+`POST /v1/forms/layout` sends a PDF or image to Azure AI Document Intelligence `prebuilt-layout` and returns full text, page lines, tables, selection marks, and bounding polygons.
+
+```powershell
+copy .env.example .env
+# set DOCUMENTINTELLIGENCE_ENDPOINT and DOCUMENTINTELLIGENCE_API_KEY in .env
+
+.\.venv\Scripts\python.exe -m uvicorn egyid.api:app --app-dir src --host 127.0.0.1 --port 8000
+```
+
+```powershell
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/forms/layout" -F "document=@path\to\form.pdf;type=application/pdf"
+```
+
+Credentials are read from `DOCUMENTINTELLIGENCE_ENDPOINT` and `DOCUMENTINTELLIGENCE_API_KEY` (environment or local `.env`). They are never committed.
 
 ## Architecture highlights
 
@@ -123,7 +141,7 @@ The suite covers NID decoding, extraction geometry, classification, validation p
 ## Project layout
 
 ```
-src/egyid/     Document Intelligence pipeline and API
+src/egyid/     Document Intelligence pipeline, Azure layout, and API
 static/        Customer and reviewer consoles
 tests/         End-to-end and unit coverage
 scripts/       Synthetic field helpers

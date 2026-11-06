@@ -52,8 +52,21 @@
         <p class="lede" id="status-message"></p>
         <p class="meta" id="app-id-line"></p>
         <div id="next-stage" class="next-stage hidden">
-          <h2>Next stage</h2>
-          <p>Application form — not implemented yet. Your ID verification is complete, so this step can be added later without changing the document pipeline.</p>
+          <h2>Application form</h2>
+          <p class="lede" id="form-detail">Download the blank form, fill it by hand, then upload the completed page.</p>
+          <p class="meta" id="form-status-line"></p>
+          <p class="form-actions">
+            <a id="blank-form-link" href="#" target="_blank" rel="noopener">View / download blank form</a>
+          </p>
+          <div id="form-upload">
+            <label class="chooser">
+              <input id="form-file" type="file" accept="application/pdf,image/jpeg,image/png,image/webp,image/bmp,image/tiff" />
+              <span>Choose completed form</span>
+            </label>
+            <p class="meta" id="form-meta"></p>
+            <button id="form-submit" type="button" disabled>Upload completed form</button>
+          </div>
+          <pre class="form-json hidden" id="form-json"></pre>
         </div>
         <div id="resubmit-box" class="hidden">
           <p class="lede">Use the upload boxes above, then resubmit this application.</p>

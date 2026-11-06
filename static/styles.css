@@ -69,6 +69,19 @@ h2.later { margin-top: 1.4rem; }
 .queue-item span { color: var(--muted); font-size: 0.8rem; }
 .queue-item.active { outline: 2px solid var(--focus); }
 .next-stage { margin-top: 1rem; padding: 0.9rem; border: 1px dashed var(--line); border-radius: 0.7rem; }
+.next-stage .form-actions { margin: 0.4rem 0 0.8rem; }
+.next-stage .chooser { margin-right: 0.6rem; }
+#form-submit { margin-top: 0.65rem; }
+.form-json {
+  margin-top: 0.85rem;
+  padding: 0.7rem;
+  overflow: auto;
+  max-height: 18rem;
+  font: 12px/1.4 ui-monospace, Consolas, monospace;
+  background: #1c1917;
+  color: #f5f0e8;
+  border-radius: 0.5rem;
+}
 .reason-box { display: block; margin: 0.7rem 0; }
 .reason-box span { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.25rem; }
 .reason-box textarea { width: 100%; font: inherit; padding: 0.45rem; border: 1px solid var(--line); border-radius: 0.4rem; }
@@ -76,6 +89,10 @@ h2.later { margin-top: 1.4rem; }
 button.danger { background: var(--fail); }
 button.warn { background: var(--review); }
 .intake.compact { grid-template-columns: 1fr 1fr; margin-bottom: 1rem; }
+.form-preview { min-height: 12rem; margin: 0.6rem 0 0.9rem; }
+.form-preview iframe, .form-preview img { width: 100%; height: 16rem; object-fit: contain; border: 0; }
+#form-review { margin-top: 1.2rem; }
+#form-decision { margin-top: 1.1rem; padding-top: 0.8rem; border-top: 1px solid var(--line); }
 .note { max-width: 28rem; margin: 0; font-size: 0.88rem; }
 
 main { padding: 1.25rem 1.75rem 3rem; max-width: 1280px; }

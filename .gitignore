@@ -20,6 +20,9 @@ build/
 htmlcov/
 *.log
 
+# Live Azure responses may contain filled-form PII
+Azure Doc/
+
 # Local workflow data — never commit
 *.sqlite
 *.sqlite3
@@ -37,4 +40,8 @@ National IDs/
 *.webp
 *.tif
 *.tiff
+*.pdf
+forms/
 !tests/fixtures/**
+!static/forms/**
+!static/forms/**/*.pdf

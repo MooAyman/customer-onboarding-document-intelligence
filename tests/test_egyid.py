@@ -907,6 +907,8 @@ def test_customer_auto_approve_and_next_stage(monkeypatch, tmp_path):
     body = created.json()
     assert body["status"] == "approved"
     assert body["next_stage"]["available"] is True
+    assert body["next_stage"]["placeholder"] is False
+    assert body["next_stage"]["blank_form_url"].endswith("/form/blank")
     assert body["stage"] == "application_form"
     again = client.get(f"/v1/applications/{body['id']}")
     assert again.json()["status"] == "approved"
@@ -1520,11 +1522,13 @@ def test_customer_and_reviewer_ui_status_confidence_and_governorates():
     reviewer = (root / "reviewer.js").read_text(encoding="utf-8")
     assert "Application stored. Keep this page to watch for reviewer updates." not in customer
     assert "statusLine.textContent = message" in customer
-    assert "if (app.status === \"pending_review\") startPoll(app.id)" in customer
+    assert "if (app.status === \"pending_review\" || app.form_status === \"pending_review\") startPoll(app.id)" in customer
     assert "Approved — you can continue" in customer
     assert "submitBtn.disabled = !ready || resubmitting" in customer
-    assert "next-stage\").classList.add(\"hidden\")" in customer
+    assert "next.classList.toggle(\"hidden\", !formReady)" in customer
     assert "function confidenceMarkup" in reviewer
+    assert "/v1/review/applications/${current.id}/form/decision" in reviewer
+    assert "Accept form" in (root / "reviewer.html").read_text(encoding="utf-8")
     assert "detection ${detection}" in reviewer
     assert "الدقهلية" in reviewer
     assert "function codeForGovName" in reviewer
@@ -2474,3 +2478,303 @@ def test_playwright_real_id_browser_flow(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+
+
+FILLED_FORM_JSON = Path(__file__).resolve().parents[1] / "Azure Doc" / "response2_1794001821936.json"
+
+
+def test_pending_application_cannot_use_form_stage(monkeypatch, tmp_path):
+    client, _store = _workflow_client(tmp_path, monkeypatch)
+    created = _submit(client).json()
+    app_id = created["id"]
+    assert created["next_stage"]["available"] is False
+    assert client.get(f"/v1/applications/{app_id}/form/blank").status_code == 409
+    blocked = client.post(
+        f"/v1/applications/{app_id}/form",
+        files={"document": ("form.pdf", b"%PDF-1.4 filled", "application/pdf")},
+    )
+    assert blocked.status_code == 409
+
+
+def test_approved_form_upload_returns_structured_fields(monkeypatch, tmp_path):
+    if not FILLED_FORM_JSON.is_file():
+        pytest.skip("filled Azure layout JSON is not available")
+    layout = json.loads(FILLED_FORM_JSON.read_text(encoding="utf-8"))
+    monkeypatch.setattr("egyid.azure_layout.analyze_layout", lambda *args, **kwargs: layout)
+    client, store = _workflow_client(tmp_path, monkeypatch, auto_approve=True)
+    created = _submit(client).json()
+    app_id = created["id"]
+    blank = client.get(f"/v1/applications/{app_id}/form/blank")
+    assert blank.status_code == 200
+    assert "pdf" in blank.headers.get("content-type", "")
+    response = client.post(
+        f"/v1/applications/{app_id}/form",
+        files={"document": ("form.pdf", b"%PDF-1.4 filled", "application/pdf")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    form = body["application_form"]
+    assert form["fields"]["full_name"]["status"] == "present"
+    assert form["fields"]["national_id"]["status"] == "unreadable"
+    assert form["fields"]["gender"]["status"] == "present"
+    assert form["fields"]["gender"]["value"] == "ذكر"
+    assert form["fields"]["mobile"]["status"] == "absent"
+    assert form["fields"]["speed"]["status"] == "present"
+    assert form["fields"]["speed"]["value"] == "30 Mbps"
+    assert form["needs_review"] is True
+    assert form["status"] == "pending_review"
+    assert body["status"] == "approved"
+    assert body["form_status"] == "pending_review"
+    assert "national_id_unreadable" in form["review_flags"]
+    assert "gender_mismatch" in form["review_flags"]
+    saved = store.get(app_id)
+    assert saved["status"] == "approved"
+    assert saved["form_status"] == "pending_review"
+    assert saved["form"]["fields"]["speed"]["value"] == "30 Mbps"
+    assert Path(saved["form_path"]).is_file()
+
+
+def _form_layout(*, name="محمد أحمد علي حسن", nid="29901011234567", male=False):
+    female_state = "unselected" if male else "selected"
+    male_state = "selected" if male else "unselected"
+    return {
+        "pages": [
+            {
+                "page_number": 1,
+                "lines": [
+                    {
+                        "content": f"الإسم: {name}",
+                        "polygon": [{"x": 4.0, "y": 2.0}, {"x": 7.0, "y": 2.3}],
+                    },
+                    {
+                        "content": f"رقم إثبات الشخصية: {nid}",
+                        "polygon": [{"x": 1.0, "y": 2.4}, {"x": 5.0, "y": 2.7}],
+                    },
+                    {
+                        "content": "النوع: ذكر انثى",
+                        "polygon": [{"x": 1.2, "y": 2.8}, {"x": 2.6, "y": 3.0}],
+                    },
+                    {
+                        "content": "رقم الهاتف المحمول: 01012345678",
+                        "polygon": [{"x": 5.0, "y": 3.1}, {"x": 7.3, "y": 3.4}],
+                    },
+                    {
+                        "content": "السرعة :",
+                        "polygon": [{"x": 6.5, "y": 4.5}, {"x": 7.0, "y": 4.7}],
+                    },
+                    {
+                        "content": "70 MB",
+                        "polygon": [{"x": 5.5, "y": 4.5}, {"x": 6.4, "y": 4.8}],
+                    },
+                ],
+                "selection_marks": [
+                    {
+                        "state": female_state,
+                        "confidence": 0.96,
+                        "polygon": [{"x": 1.01, "y": 2.81}, {"x": 1.16, "y": 2.95}],
+                    },
+                    {
+                        "state": male_state,
+                        "confidence": 0.94,
+                        "polygon": [{"x": 1.59, "y": 2.81}, {"x": 1.76, "y": 2.96}],
+                    },
+                ],
+            }
+        ],
+        "tables": [],
+    }
+
+
+def _upload_form(client, app_id, layout, monkeypatch, filename="form.pdf"):
+    monkeypatch.setattr("egyid.azure_layout.analyze_layout", lambda *args, **kwargs: layout)
+    return client.post(
+        f"/v1/applications/{app_id}/form",
+        files={"document": (filename, b"%PDF-1.4 filled", "application/pdf")},
+    )
+
+
+def test_form_requiring_review_is_independent_of_id_status(monkeypatch, tmp_path):
+    client, store = _workflow_client(tmp_path, monkeypatch, auto_approve=True)
+    created = _submit(client).json()
+    app_id = created["id"]
+    response = _upload_form(client, app_id, _form_layout(male=True), monkeypatch)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "approved"
+    assert body["form_status"] == "pending_review"
+    assert body["application_form"]["status"] == "pending_review"
+    assert body["application_form"]["needs_review"] is True
+    assert "gender_mismatch" in body["application_form"]["review_flags"]
+    assert body["next_stage"]["can_upload"] is False
+    rec = store.get(app_id)
+    assert rec["status"] == "approved"
+    assert rec["form_status"] == "pending_review"
+    queue = client.get("/v1/review/applications").json()["applications"]
+    item = next(row for row in queue if row["id"] == app_id)
+    assert item["status"] == "approved"
+    assert item["form_status"] == "pending_review"
+    detail = client.get(f"/v1/review/applications/{app_id}").json()
+    assert detail["form"]["fields"]["gender"]["value"] == "ذكر"
+    assert detail["form"]["fields"]["national_id"]["status"] == "present"
+    assert "gender_mismatch" in detail["form"]["review_flags"]
+    blocked_id = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={"action": "reject", "reason": "Do not change the ID decision."},
+    )
+    assert blocked_id.status_code == 409
+    assert client.get(f"/v1/applications/{app_id}").json()["status"] == "approved"
+
+
+def test_reviewer_can_correct_approve_and_reject_application_form(monkeypatch, tmp_path):
+    client, store = _workflow_client(tmp_path, monkeypatch, auto_approve=True)
+    first = _submit(client).json()["id"]
+    assert _upload_form(client, first, _form_layout(male=True), monkeypatch).status_code == 200
+    corrected_name = "محمد أحمد علي حسن كامل"
+    accepted = client.post(
+        f"/v1/review/applications/{first}/form/decision",
+        json={"action": "accept", "corrections": {"full_name": corrected_name}},
+    )
+    assert accepted.status_code == 200, accepted.text
+    customer = accepted.json()["customer"]
+    assert customer["status"] == "approved"
+    assert customer["form_status"] == "approved"
+    assert customer["application_form"]["corrections"]["full_name"] == corrected_name
+    rec = store.get(first)
+    assert rec["form"]["fields"]["full_name"]["value"] != corrected_name
+    assert rec["form"]["corrections"]["full_name"] == corrected_name
+    assert rec["status"] == "approved"
+
+    other, _other_store = _workflow_client(tmp_path / "reject-case", monkeypatch, auto_approve=True)
+    second = _submit(other).json()["id"]
+    assert _upload_form(other, second, _form_layout(male=True), monkeypatch).status_code == 200
+    rejected = other.post(
+        f"/v1/review/applications/{second}/form/decision",
+        json={"action": "reject", "reason": "The handwritten form does not match the ID."},
+    )
+    assert rejected.status_code == 200
+    rejected_customer = other.get(f"/v1/applications/{second}").json()
+    assert rejected_customer["status"] == "approved"
+    assert rejected_customer["form_status"] == "rejected"
+    assert rejected_customer["application_form"]["can_resubmit"] is False
+    assert "does not match" in (rejected_customer["application_form"]["reviewer_reason"] or "")
+
+
+def test_customer_sees_application_form_status(monkeypatch, tmp_path):
+    client, _store = _workflow_client(tmp_path, monkeypatch, auto_approve=True)
+    app_id = _submit(client).json()["id"]
+    uploaded = _upload_form(client, app_id, _form_layout(male=True), monkeypatch).json()
+    assert uploaded["form_status"] == "pending_review"
+    assert "pending human review" in (uploaded["application_form"]["message"] or "").lower()
+    again = client.get(f"/v1/applications/{app_id}").json()
+    assert again["form_status"] == "pending_review"
+    assert again["application_form"]["needs_review"] is True
+    client.post(
+        f"/v1/review/applications/{app_id}/form/decision",
+        json={"action": "accept", "corrections": {}},
+    )
+    done = client.get(f"/v1/applications/{app_id}").json()
+    assert done["status"] == "approved"
+    assert done["form_status"] == "approved"
+    assert done["application_form"]["message"]
+
+
+def test_second_form_upload_conflicts_until_resubmission_allowed(monkeypatch, tmp_path):
+    client, store = _workflow_client(tmp_path, monkeypatch, auto_approve=True)
+    app_id = _submit(client).json()["id"]
+    first = _upload_form(client, app_id, _form_layout(male=True), monkeypatch)
+    assert first.status_code == 200
+    original = store.get(app_id)["form"]["fields"]["gender"]["value"]
+    second = _upload_form(client, app_id, _form_layout(male=False), monkeypatch)
+    assert second.status_code == 409
+    assert second.json()["detail"] == "application form already submitted"
+    assert second.json()["form_status"] == "pending_review"
+    rec = store.get(app_id)
+    assert rec["form"]["fields"]["gender"]["value"] == original
+    asked = client.post(
+        f"/v1/review/applications/{app_id}/form/decision",
+        json={"action": "resubmit", "reason": "Please upload a clearer completed form."},
+    )
+    assert asked.status_code == 200
+    waiting = client.get(f"/v1/applications/{app_id}").json()
+    assert waiting["form_status"] == "resubmission_required"
+    assert waiting["application_form"]["can_resubmit"] is True
+    assert waiting["next_stage"]["can_upload"] is True
+    third = _upload_form(client, app_id, _form_layout(male=False), monkeypatch, filename="form2.pdf")
+    assert third.status_code == 200
+    assert third.json()["form_status"] in {"pending_review", "approved"}
+    assert store.get(app_id)["form"]["fields"]["gender"]["value"] == "أنثى"
+
+
+def test_id_resubmission_clears_previous_application_form(monkeypatch, tmp_path):
+    client, store = _workflow_client(tmp_path, monkeypatch, auto_approve=True)
+    app_id = _submit(client).json()["id"]
+    uploaded = _upload_form(client, app_id, _form_layout(male=True), monkeypatch)
+    assert uploaded.status_code == 200
+    form_path = Path(store.get(app_id)["form_path"])
+    assert form_path.is_file()
+    store.update(app_id, status="resubmission_required", stage="id_verification")
+    again = _submit(client, f"/v1/applications/{app_id}/resubmit")
+    assert again.status_code == 200
+    body = again.json()
+    assert body["application_form"] is None
+    assert body["form_status"] is None
+    rec = store.get(app_id)
+    assert rec["form"] is None
+    assert rec["form_path"] is None
+    assert rec["form_status"] is None
+    assert not form_path.is_file()
+
+
+def test_id_snapshot_prefers_reviewer_final_value():
+    from egyid.workflow import id_snapshot
+
+    record = {
+        "extraction": {
+            "front": {
+                "full_name_ar": {"value": "محمد أحمد علي حسن"},
+                "national_id": {"value": "29901011234567"},
+            },
+            "back": {"national_id": {"value": "29901011234567"}},
+            "derived": {"gender": {"value": "أنثى"}},
+        },
+        "review": {
+            "fields": [
+                {"id": "front.full_name_ar", "final_value": "خالد محمود سعيد"},
+                {"id": "front.national_id", "final_value": "29812102123456"},
+                {"id": "derived.gender", "final_value": "ذكر"},
+            ]
+        },
+    }
+    name, nid, gender = id_snapshot(record)
+    assert name == "خالد محمود سعيد"
+    assert nid == "29812102123456"
+    assert gender == "ذكر"
+    fallback = id_snapshot({**record, "review": {"fields": []}})
+    assert fallback == ("محمد أحمد علي حسن", "29901011234567", "أنثى")
+
+
+def test_form_cross_check_uses_reviewer_corrected_stage1_values(monkeypatch, tmp_path):
+    client, store = _workflow_client(tmp_path, monkeypatch)
+    pending = _submit(client).json()
+    app_id = pending["id"]
+    original = store.get(app_id)["extraction"]["front"]["full_name_ar"]["value"]
+    corrected = "خالد محمود سعيد"
+    accepted = client.post(
+        f"/v1/review/applications/{app_id}/decision",
+        json={
+            "action": "accept",
+            "corrections": {
+                "front.full_name_ar": corrected,
+                "front.portrait_present": "true",
+                "front.header_present": "true",
+            },
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert store.get(app_id)["extraction"]["front"]["full_name_ar"]["value"] == original
+    response = _upload_form(client, app_id, _form_layout(name=original, male=False), monkeypatch)
+    assert response.status_code == 200
+    flags = response.json()["application_form"]["review_flags"]
+    assert "name_mismatch" in flags
+    assert response.json()["status"] == "approved"
+    assert response.json()["form_status"] == "pending_review"

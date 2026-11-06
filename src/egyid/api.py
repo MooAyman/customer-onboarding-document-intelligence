@@ -9,18 +9,29 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from egyid.azure_layout import (
+    AzureLayoutConfigError,
+    AzureLayoutError,
+    analyze_layout,
+    is_supported_form,
+)
 from egyid.pipeline import process_id_pair
 from egyid.review import MSG_NID_MISMATCH, build_review, persist_review, review_file
 from egyid.store import DuplicateSubmissionError, Store, get_store
 from egyid.workflow import (
+    FormConflictError,
     UploadRejected,
+    apply_form_decision,
     apply_reviewer_decision,
+    blank_form_path,
     customer_view,
     duplicate_messages,
     image_path,
     reviewer_detail,
     reviewer_summary,
     submit_application,
+    submit_application_form,
+    uploaded_form_path,
 )
 
 ALLOWED_TYPES = {
@@ -110,6 +121,99 @@ def create_app(store: Store | None = None) -> FastAPI:
         if not page.is_file():
             raise HTTPException(status_code=404, detail="ui not found")
         return FileResponse(page)
+
+    @app.post("/v1/forms/layout")
+    async def analyze_form_layout(
+        document: UploadFile = File(..., description="Application form PDF or image"),
+    ) -> dict:
+        if not is_supported_form(document.content_type, document.filename):
+            raise HTTPException(
+                status_code=415,
+                detail="unsupported form type; upload a PDF or image",
+            )
+        payload = await document.read()
+        if not payload:
+            raise HTTPException(status_code=422, detail="empty document")
+        try:
+            return analyze_layout(
+                payload,
+                content_type=document.content_type,
+                filename=document.filename,
+            )
+        except AzureLayoutConfigError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except AzureLayoutError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+
+    @app.get("/v1/applications/{application_id}/form/blank")
+    def download_blank_form(application_id: str) -> FileResponse:
+        record = db.get(application_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="application not found")
+        if record["status"] != "approved" or record["stage"] != "application_form":
+            raise HTTPException(status_code=409, detail="identity is not accepted")
+        path = blank_form_path()
+        if path is None:
+            raise HTTPException(status_code=404, detail="blank form not found")
+        return FileResponse(
+            path,
+            media_type="application/pdf",
+            filename="dsl-application.pdf",
+        )
+
+    @app.post("/v1/applications/{application_id}/form")
+    async def upload_application_form(
+        application_id: str,
+        document: UploadFile = File(..., description="Completed application form PDF or image"),
+    ) -> dict:
+        if not is_supported_form(document.content_type, document.filename):
+            raise HTTPException(
+                status_code=415,
+                detail="unsupported form type; upload a PDF or image",
+            )
+        payload = await document.read()
+        try:
+            record = submit_application_form(
+                db,
+                application_id,
+                payload,
+                filename=document.filename,
+                content_type=document.content_type,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="application not found") from None
+        except FormConflictError as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": str(exc),
+                    "form_status": exc.form_status,
+                    "customer_message": "This application already has a submitted form.",
+                },
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except AzureLayoutConfigError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        except AzureLayoutError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+        return customer_view(record)
+
+    @app.get("/v1/applications/{application_id}/form")
+    def get_application_form(application_id: str) -> FileResponse:
+        record = db.get(application_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="application not found")
+        path = uploaded_form_path(record)
+        if path is None:
+            raise HTTPException(status_code=404, detail="form not found")
+        suffix = path.suffix.lower()
+        media = "application/pdf" if suffix == ".pdf" else "image/jpeg" if suffix in {".jpg", ".jpeg"} else "application/octet-stream"
+        return FileResponse(path, media_type=media, filename=path.name)
 
     @app.post("/v1/id-documents")
     async def process_id_documents(
@@ -257,6 +361,29 @@ def create_app(store: Store | None = None) -> FastAPI:
                 "application": reviewer_detail(record),
                 "customer": customer_view(record),
                 "review": review,
+            }
+        )
+
+    @app.post("/v1/review/applications/{application_id}/form/decision")
+    def decide_application_form(application_id: str, payload: DecisionIn) -> JSONResponse:
+        try:
+            record = apply_form_decision(
+                db,
+                application_id,
+                payload.action,
+                payload.corrections,
+                payload.reason,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="application not found") from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return JSONResponse(
+            {
+                "application": reviewer_detail(record),
+                "customer": customer_view(record),
             }
         )
 

@@ -107,6 +107,15 @@ function statusTitle(status) {
   }[status] || status;
 }
 
+function formStatusTitle(status) {
+  return {
+    approved: "Application form accepted",
+    pending_review: "Application form pending review",
+    rejected: "Application form rejected",
+    resubmission_required: "Application form resubmission required",
+  }[status] || "";
+}
+
 function renderStatus(app) {
   current = app;
   statusLine.classList.remove("error");
@@ -118,11 +127,36 @@ function renderStatus(app) {
   document.getElementById("status-message").textContent = message;
   statusLine.textContent = message;
   document.getElementById("app-id-line").textContent = `Application ${app.id}`;
-  document.getElementById("next-stage").classList.add("hidden");
+  const next = document.getElementById("next-stage");
+  const formReady = Boolean(app.next_stage && app.next_stage.available);
+  next.classList.toggle("hidden", !formReady);
+  if (formReady) {
+    const form = app.application_form;
+    document.getElementById("form-detail").textContent =
+      (form && form.message) || app.next_stage.detail || "Download the blank form, fill it by hand, then upload the completed page.";
+    document.getElementById("form-status-line").textContent = formStatusTitle(app.form_status);
+    const blank = document.getElementById("blank-form-link");
+    blank.href = app.next_stage.blank_form_url || "#";
+    const canUpload = Boolean(app.next_stage.can_upload);
+    document.getElementById("form-upload").classList.toggle("hidden", !canUpload);
+    formSubmitBtn.disabled = !(canUpload && formInput.files[0]);
+    renderFormResult(form);
+  }
   document.getElementById("resubmit-box").classList.toggle("hidden", !app.can_resubmit);
   syncButtons();
-  if (app.status === "pending_review") startPoll(app.id);
+  if (app.status === "pending_review" || app.form_status === "pending_review") startPoll(app.id);
   else stopPoll();
+}
+
+function renderFormResult(payload) {
+  const box = document.getElementById("form-json");
+  if (!payload) {
+    box.classList.add("hidden");
+    box.textContent = "";
+    return;
+  }
+  box.classList.remove("hidden");
+  box.textContent = JSON.stringify(payload, null, 2);
 }
 
 function formatWhen(value) {
@@ -176,7 +210,7 @@ function startPoll(id) {
   stopPoll();
   pollTimer = setInterval(async () => {
     const app = await loadApplication(id);
-    if (app && app.status !== "pending_review") refreshHistory();
+    if (app && app.status !== "pending_review" && app.form_status !== "pending_review") refreshHistory();
   }, 4000);
 }
 
@@ -252,6 +286,44 @@ resubmitBtn.addEventListener("click", async () => {
     statusLine.textContent = error.message;
   } finally {
     syncButtons();
+  }
+});
+
+const formInput = document.getElementById("form-file");
+const formSubmitBtn = document.getElementById("form-submit");
+formInput.addEventListener("change", () => {
+  const file = formInput.files[0];
+  document.getElementById("form-meta").textContent = file
+    ? `${file.name} · ${(file.size / 1024).toFixed(0)} KB`
+    : "";
+  const canUpload = Boolean(current && current.next_stage && current.next_stage.can_upload);
+  formSubmitBtn.disabled = !(canUpload && file);
+});
+formSubmitBtn.addEventListener("click", async () => {
+  if (!current || !formInput.files[0] || !(current.next_stage && current.next_stage.can_upload)) return;
+  formSubmitBtn.disabled = true;
+  statusLine.classList.remove("error");
+  statusLine.textContent = "Analyzing completed form…";
+  try {
+    const body = new FormData();
+    body.append("document", formInput.files[0]);
+    const response = await fetch(`/v1/applications/${current.id}/form`, {
+      method: "POST",
+      body,
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || `Request failed (${response.status})`);
+    }
+    renderStatus(payload);
+    await refreshHistory();
+    statusLine.textContent = (payload.application_form && payload.application_form.message) || "Form submitted.";
+  } catch (error) {
+    statusLine.classList.add("error");
+    statusLine.textContent = error.message;
+  } finally {
+    const canUpload = Boolean(current && current.next_stage && current.next_stage.can_upload);
+    formSubmitBtn.disabled = !(canUpload && formInput.files[0]);
   }
 });
 
