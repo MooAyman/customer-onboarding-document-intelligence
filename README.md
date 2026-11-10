@@ -1,84 +1,222 @@
-# Egyptian National ID Document Intelligence
+# End-to-End Document Intelligence & Identity Verification System
 
-**A production-style Document Intelligence system for Egyptian National ID onboarding.**
+A complete onboarding application for Egyptian National ID and application-form processing: document ingestion, classification, OCR, structured extraction, validation, cross-document checks, human review, and persistent application workflow.
 
-Upload the front and back of a national ID. The pipeline reads Arabic print with on-device OCR, extracts structured fields from card geometry, decodes the 14-digit NID, classifies the document, applies onboarding policy, and routes the case — automatically or through a human reviewer. After identity is accepted, the customer downloads a blank application form, fills it by hand, and uploads the completed page. Azure Document Intelligence `prebuilt-layout` analyzes the form, a field mapper extracts structured values, and those values are cross-checked against the verified National ID.
+The system is presented through a **Customer Portal** and a **Reviewer Dashboard**, with FastAPI persistence in SQLite.
 
-Built for telecom-style customer onboarding: fast intake, explainable decisions, and an auditable review path for both the identity document and the application form.
-
-FastAPI · RapidOCR · Azure Document Intelligence · OpenCV · Pydantic · SQLite · Human-in-the-loop
+FastAPI · RapidOCR · Azure Document Intelligence · OpenCV · Pydantic · SQLite
 
 ---
 
-## Capabilities
+## Workflow
 
-- **Dual-side Arabic OCR** — RapidOCR with Arabic PP-OCRv5 mobile recognition, running locally on CPU via ONNX Runtime
-- **Geometry-aware extraction** — name, address, national ID, gender, religion, expiry, and serial mapped from ID-1 layout and card geometry
-- **NID intelligence** — the 14-digit national ID is parsed into date of birth, gender, and birth governorate, then cross-checked with printed fields
-- **Document classification** — multi-signal labeling (`target_id` / `non_target` / `uncertain`) from OCR evidence and visual card cues
-- **Deterministic policy** — age ≥ 18, expiry, NID agreement across sides, field presence, and image quality, each with a named check
-- **Duplicate control** — SHA-256 image identity plus canonical NID claims, with a safe resubmit path for the same application
-- **Human review** — reviewer console with live validation, original OCR preserved, corrections stored separately
-- **Application form processing** — after ID approval, download a blank form, upload the completed PDF or image, and map `full_name`, `national_id`, `gender`, `mobile`, and `speed`
-- **Stage 1 cross-validation** — form name, National ID, and gender compared against reviewer-approved ID values when present, otherwise against original extraction
-- **Independent form review** — form `pending_review` / `approved` / `rejected` / `resubmission_required` does not change the National ID decision
-- **Transactional persistence** — SQLite applications, uploaded images and forms, and backup-and-restore on file replace
-
-## Pipeline
-
-```
-Front + back images
-        │
-        ▼
-  Image inspect & quality
-        │
-        ▼
-  RapidOCR  →  layout extraction  →  NID decode
-        │
-        ▼
-  Document classification
-        │
-        ▼
-  Onboarding validation
-        │
-        ├── completed  →  approved  →  application form
-        ├── failed     →  rejected
-        └── needs_review → reviewer console → accept / reject / resubmit
+```mermaid
+flowchart TD
+  A[Document ingestion] --> B[Image inspection and quality]
+  B --> C[Local RapidOCR]
+  C --> D[Geometry extraction and NID decode]
+  D --> E[Document classification]
+  E --> F[Field normalization and validation]
+  F -->|completed| G[ID approved]
+  F -->|failed| H[ID rejected]
+  F -->|needs_review| I[Reviewer dashboard]
+  I -->|accept| G
+  I -->|reject| H
+  I -->|resubmit| J[Customer uploads new ID images]
+  J --> B
+  G --> K[Application form]
+  K --> L[Azure prebuilt-layout]
+  L --> M[Custom field mapping]
+  M --> N[Cross-document verification]
+  N --> O[Form decision and HITL]
 ```
 
-When the National ID is `approved`, the case moves to stage `application_form`:
+| Stage | What happens |
+| --- | --- |
+| Document ingestion and image processing | Front and back National ID images are inspected for format, size, and card-like geometry, then stored with the application. |
+| Document classification | The pipeline labels `target_id`, `non_target`, or `uncertain` from OCR evidence and visual cues. |
+| OCR and structured extraction | Local RapidOCR reads Arabic print. Geometry-aware mapping produces name, address, national ID, gender, religion, expiry, serial, and derived NID attributes. |
+| Field normalization and validation | Eastern/Western digits, NID structure, age, expiry, front/back agreement, and quality checks produce a machine decision. |
+| Identity verification | The 14-digit national ID is decoded and compared with printed fields, front and back, and onboarding policy. |
+| Cross-document verification | After ID acceptance, the application form is mapped and compared with the Stage 1 identity snapshot. |
+| Human review | Confidence, missing fields, and policy flags route a case to the reviewer. Original OCR remains on the record; corrections are stored separately. |
+| Application decisions | Automated and reviewer decisions yield `approved`, `pending_review`, `rejected`, or `resubmission_required` for the ID, independently of form status. |
+| Persistent records | Applications, images, extraction, form mapping, and review history are stored in SQLite. |
+| Portals | Customers submit documents and follow status. Reviewers inspect images, fields, and form pages, then record decisions. |
 
-```
-Blank form download  →  handwritten completion  →  form upload
-        │
-        ▼
-  Azure prebuilt-layout  →  field mapping  →  Stage 1 cross-check
-        │
-        ├── no review flags  →  form approved
-        └── review flags     →  form pending_review → form reviewer
-                                      │
-                                      ├── accept
-                                      ├── reject
-                                      └── request form resubmission
-```
+Local OCR, application validation, and human-review decisions are separate results. They are not merged into a single score.
+
+## Local OCR architecture
+
+Egyptian National IDs contain highly sensitive personal information. **RapidOCR** is used as a privacy-conscious processing layer: identity-document images are read on the local machine and are not transmitted to an external OCR provider during ordinary onboarding.
+
+The local pipeline is designed for controlled, resource-constrained environments (CPU ONNX Runtime, Arabic PP-OCRv5 mobile recognition). The same application architecture can host more powerful OCR or Document AI services when deployment requirements, processing resources, and data-handling policy permit them.
+
+National ID images stay on the machine during Stage 1. Form pages leave the machine when a completed application form is submitted for Azure layout analysis.
+
+## Azure Document Intelligence
+
+Azure `prebuilt-layout` analyzes the **Application Form**. It returns text, layout, tables, selection marks, and spatial information. It does not emit the business fields used by onboarding.
+
+A Python mapping layer (`form_map.py`) converts that layout into application-specific fields: `full_name`, `national_id`, `gender`, `mobile`, and `speed`. The application then normalizes values, assigns field status (`present` / `unreadable` / `absent`), validates them, and cross-checks name, National ID, and gender against the Stage 1 identity snapshot (reviewer `final_value` when present).
+
+## Key capabilities
+
+- Dual-side Arabic OCR on-device via RapidOCR and ONNX Runtime
+- Geometry-aware ID extraction and 14-digit NID decode (date of birth, gender, birth governorate)
+- Named onboarding checks: age ≥ 18, expiry, front/back NID agreement, field presence, image quality
+- Duplicate control on image hashes and canonical NID claims
+- Independent National ID and application-form human review
+- Azure `prebuilt-layout` plus custom form mapping and Stage 1 cross-check
+- Customer Portal and Reviewer Dashboard over a persistent application store
+
+## Architecture
 
 | Module | Responsibility |
 | --- | --- |
-| `api.py` | HTTP surface for customer and reviewer |
-| `workflow.py` | Application lifecycle and decision mapping |
-| `pipeline.py` | End-to-end processing of an ID pair |
-| `imaging.py` | Decode, quality heuristics, targeted back-side crops |
+| `api.py` | HTTP surface for customer, reviewer, and form analysis |
+| `workflow.py` | Application lifecycle and form HITL |
+| `pipeline.py` | End-to-end local processing of an ID pair |
+| `imaging.py` | Decode, quality heuristics, back-side crops |
 | `ocr.py` | Arabic OCR engine |
 | `extract.py` | Field assignment from text, position, and keywords |
 | `nid.py` | National ID structure and derived attributes |
 | `classify.py` | Document-type classification |
 | `validate.py` | Policy checks and machine decision |
-| `review.py` | Reviewer Accept gates |
-| `azure_layout.py` | Azure Document Intelligence `prebuilt-layout` client |
+| `review.py` | Reviewer Accept gates for the ID |
+| `azure_layout.py` | Azure `prebuilt-layout` client |
 | `form_map.py` | Layout JSON → application fields and Stage 1 cross-check |
-| `store.py` | SQLite, uploads, duplicate claims, resubmit backups |
+| `store.py` | SQLite, uploads, duplicate claims, file replace with backups |
 
-OCR output is the system of record. Reviewer edits live in `corrections`, so extraction and human judgment stay separable. Application-form corrections are stored the same way, separately from the original mapped fields.
+OCR output is the system of record for Stage 1. Reviewer edits live in `corrections`. Form corrections are stored the same way, separately from the original mapped fields.
+
+The staged application record (stored images, extraction, validation, independent ID and form status, reviewer decisions) is the extension point for a future external identity-verification provider. That provider would run as an optional, explicit step alongside local OCR, not inside it.
+
+## Technologies
+
+| Area | Library / service |
+| --- | --- |
+| API and UI hosting | FastAPI, Uvicorn, static HTML/JS |
+| ID OCR | RapidOCR (`rapidocr[rtl]`), ONNX Runtime |
+| Imaging | OpenCV, Pillow, NumPy |
+| Form layout | Azure AI Document Intelligence `prebuilt-layout` |
+| Field models | Pydantic v2 |
+| Persistence | SQLite |
+| Tests | pytest, httpx |
+
+Python **3.11–3.13**.
+
+## National ID processing
+
+1. Customer uploads front and back images (`POST /v1/applications`).
+2. The server rejects empty, corrupt, tiny, or non-card-looking files before a case is stored.
+3. RapidOCR reads Arabic print on CPU. Models download on first inference.
+4. `extract.py` assigns fields using normalized coordinates, title-relative name geometry, and Arabic keyword maps, including dedicated crops for gender, religion, and expiry on the back.
+5. `nid.py` validates the 14-digit structure (century, date, governorate) and derives date of birth, gender, and governorate.
+6. `classify.py` labels `target_id`, `non_target`, or `uncertain`.
+7. `validate.py` runs named checks. Automated `completed` → ID `approved`; `failed` → `rejected`; `needs_review` → reviewer console.
+
+Duplicate front image, back image, or canonical NID on another application returns HTTP 409. The same application may resubmit when the reviewer requests new photos. Resubmitting the National ID clears previous form data and the stored form file.
+
+A CLI runs the same ID pipeline without creating an application:
+
+```powershell
+.\.venv\Scripts\python.exe -m egyid --front path\to\front.jpg --back path\to\back.jpg
+```
+
+Values are redacted by default. Pass `--show-values` to print extracted fields.
+
+## Application form processing
+
+Azure `prebuilt-layout` returns page lines, tables, selection marks, and polygons. `form_map.py` maps that JSON onto five fields:
+
+| Field | Mapping rule (page 1 header band) |
+| --- | --- |
+| `full_name` | Arabic remainder on a line/cell containing الإسم / الاسم |
+| `national_id` | 14-digit structurally valid NID beside رقم إثبات الشخصية / الرقم القومي |
+| `gender` | Selection marks on a row that contains ذكر / أنثى (left = أنثى, right = ذكر) |
+| `mobile` | 11-digit value starting with `01` beside رقم الهاتف المحمول |
+| `speed` | Handwritten 30 / 70 / 100 Mbps near السرعة; the printed option trio is ignored |
+
+Each field has a status: `present`, `unreadable`, or `absent`. Missing or unreadable identity values are never treated as a successful match against Stage 1.
+
+If any review flag is set, `form_status` is `pending_review`. If none are set, the form is stored as `approved`. A second form upload returns HTTP 409 unless the form is `resubmission_required`.
+
+Standalone layout analysis (no application record):
+
+```powershell
+curl.exe -s -X POST "http://127.0.0.1:8000/v1/forms/layout" -F "document=@path\to\form.pdf;type=application/pdf"
+```
+
+## Human review
+
+**National ID.** While `status` is `pending_review`, the reviewer inspects both images, edits extracted fields, and sends `accept`, `reject`, or `resubmit` to `POST /v1/review/applications/{id}/decision`. Reject and resubmit require a reason. Accept is blocked until review validation passes (including matching front/back NID). Original OCR is not overwritten.
+
+**Application form.** While `form_status` is `pending_review`, the reviewer inspects mapped fields and the uploaded file, edits values, and sends `accept`, `reject`, or `resubmit` to `POST /v1/review/applications/{id}/form/decision`. That call does not change ID `status`.
+
+The customer portal polls while either the ID or the form is `pending_review`.
+
+## Project structure
+
+```
+src/egyid/          Pipeline, Azure layout client, form mapper, API
+static/             Customer portal and reviewer dashboard
+static/forms/       Place `dsl-application.pdf` here for blank-form download
+tests/              Unit and API tests (Azure and OCR are mocked or skipped)
+scripts/            Synthetic parser helpers
+.env.example        Azure variable names (placeholders only)
+```
+
+Local ID photos, Azure JSON dumps, SQLite, uploads, and credentials belong in gitignored locations such as `National IDs/`, `Azure Doc/`, `artifacts/`, and `.env`.
+
+## Installation and local setup
+
+**Python 3.11–3.13**
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+copy .env.example .env
+```
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env
+```
+
+Run commands from the repository root so `static/` and `.env` resolve correctly.
+
+## Environment configuration
+
+Copy `.env.example` to `.env` (gitignored) and set:
+
+```
+DOCUMENTINTELLIGENCE_ENDPOINT=https://YOUR-RESOURCE.cognitiveservices.azure.com/
+DOCUMENTINTELLIGENCE_API_KEY=
+```
+
+| Variable | Used by |
+| --- | --- |
+| `DOCUMENTINTELLIGENCE_ENDPOINT` | Form upload and `POST /v1/forms/layout` |
+| `DOCUMENTINTELLIGENCE_API_KEY` | Same |
+
+Values are read from the process environment, or from `.env` if the variable is not already set (`azure_layout.py`). Stage 1 RapidOCR does not use these variables.
+
+Place a blank PDF at `static/forms/dsl-application.pdf` for blank-form download. See `static/forms/README.md` for expected labels.
+
+## How to run the application
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn egyid.api:app --app-dir src --host 127.0.0.1 --port 8000
+```
+
+```bash
+python -m uvicorn egyid.api:app --app-dir src --host 127.0.0.1 --port 8000
+```
+
+OCR models load on the first ID inference.
 
 ## Interfaces
 
@@ -87,177 +225,71 @@ OCR output is the system of record. Reviewer edits live in `corrections`, so ext
 | Customer portal | http://127.0.0.1:8000/ |
 | Reviewer dashboard | http://127.0.0.1:8000/review |
 | Health | http://127.0.0.1:8000/health |
-| Form layout (`prebuilt-layout`) | `POST /v1/forms/layout` |
+| OpenAPI (Swagger) | http://127.0.0.1:8000/docs |
+| ReDoc | http://127.0.0.1:8000/redoc |
 
-**Customer journey.** The portal submits a front/back ID pair with a `customer_id` stored in the browser. Status is `approved`, `pending_review`, `rejected`, or `resubmission_required`. The page reloads saved applications and polls while the ID or the form is `pending_review`. After the ID is approved, the application-form panel appears: download the blank PDF, upload the completed form, and follow `form_status` (`pending_review`, `approved`, `rejected`, or `resubmission_required`). A new form upload is accepted only when no form is on file or the reviewer requested form resubmission. If the reviewer requested new ID images, the customer resubmits front and back on the same application.
+**Customer.** Submit front and back ID images. Status is `approved`, `pending_review`, `rejected`, or `resubmission_required`. After ID approval, download the blank form, upload the completed page, and follow `form_status`. A new form is accepted only when none is on file or the reviewer requested form resubmission.
 
-**Reviewer journey.** The dashboard lists applications with ID `status` and `form_status`. Opening a case shows front and back images, extracted ID fields, automated checks, and — when a form has been submitted — the form file, mapped fields, confidence, statuses, and review flags. ID actions (accept, reject, request resubmission) apply only while the ID is `pending_review`. Form actions (accept form, reject form, request form resubmission) apply only while the form is `pending_review`. Each decision is independent.
+**Reviewer.** Open a case, inspect ID images and (when present) the form, correct fields, and record ID or form decisions independently.
 
-A CLI is available for the National ID pipeline without the browser.
+## API
 
-## Quick start
+Customer responses include `status`, `form_status`, `stage`, `customer_message`, `can_resubmit`, `next_stage`, and `application_form`. Reviewer detail includes `extraction`, ID `corrections`, `review`, image URLs, `form`, and `form_url`.
 
-**Python 3.11–3.13**
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness |
+| `GET` | `/` | Customer portal |
+| `GET` | `/review` | Reviewer dashboard |
+| `POST` | `/v1/applications` | Create application (`front`, `back`, `customer_id`). Duplicate → 409. Bad upload → 422. |
+| `GET` | `/v1/applications/{id}` | Customer view |
+| `GET` | `/v1/customers/{customer_id}/applications` | Applications for that customer |
+| `POST` | `/v1/applications/{id}/resubmit` | Replace ID images while `resubmission_required`. Clears any previous form. |
+| `GET` | `/v1/applications/{id}/front` | Stored front image |
+| `GET` | `/v1/applications/{id}/back` | Stored back image |
+| `GET` | `/v1/applications/{id}/form/blank` | Blank PDF (ID must be approved) |
+| `POST` | `/v1/applications/{id}/form` | Upload completed form. Runs Azure layout, maps fields, cross-checks Stage 1. Missing Azure config → 503. |
+| `GET` | `/v1/applications/{id}/form` | Uploaded form file |
+| `GET` | `/v1/review/applications` | Reviewer queue |
+| `GET` | `/v1/review/applications/{id}` | Reviewer detail |
+| `POST` | `/v1/review/applications/{id}/decision` | ID decision `{ "action", "corrections", "reason" }` |
+| `POST` | `/v1/review/applications/{id}/form/decision` | Form decision; does not change ID `status` |
+| `POST` | `/v1/forms/layout` | Ungated `prebuilt-layout` JSON |
+| `POST` | `/v1/id-documents` | ID pipeline without creating an application |
+| `POST` | `/v1/reviews` | Persist a review JSON |
+| `GET` | `/v1/reviews/{review_id}` | Download a persisted review |
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-copy .env.example .env
-# set DOCUMENTINTELLIGENCE_ENDPOINT and DOCUMENTINTELLIGENCE_API_KEY in .env
-.\.venv\Scripts\python.exe -m uvicorn egyid.api:app --app-dir src --host 127.0.0.1 --port 8000
-```
-
-Linux / macOS:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
-# set DOCUMENTINTELLIGENCE_ENDPOINT and DOCUMENTINTELLIGENCE_API_KEY in .env
-python -m uvicorn egyid.api:app --app-dir src --host 127.0.0.1 --port 8000
-```
-
-Open http://127.0.0.1:8000/ for the customer portal and http://127.0.0.1:8000/review for the reviewer dashboard.
-
-OCR models load on first ID inference. Form upload and `POST /v1/forms/layout` read Azure credentials from the environment or local `.env`.
-
-### Two-stage demo
-
-1. Start the server with the commands above.
-2. In the customer portal, upload National ID front and back images and submit.
-3. If status is `pending_review`, open the reviewer dashboard, inspect the card, correct fields if needed, and accept (or reject / request resubmission).
-4. When the ID is `approved`, download the blank application form from the customer portal, fill it by hand, and upload the completed PDF or image.
-5. If the form is `pending_review`, the reviewer inspects mapped fields, applies corrections, and accepts, rejects, or requests a new form. The National ID decision stays unchanged.
-6. The customer portal shows `form_status` and the form message for that application.
-
-### CLI
-
-```powershell
-.\.venv\Scripts\python.exe -m egyid --front path\to\front.jpg --back path\to\back.jpg
-```
-
-Field values are redacted by default. Pass `--show-values` to print the extracted payload.
-
-### Tests
+## Tests
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The suite covers NID decoding, extraction geometry, classification, validation policy, duplicate and resubmit flows, review gates, API contracts, application-form mapping, form review decisions, Stage 1 cross-check, and mocked Azure layout analysis — including optional real-OCR and Playwright paths when local ID samples are present.
-
-## Application form processing
-
-After identity is accepted (`status=approved`, `stage=application_form`), the customer downloads a blank application PDF and uploads the completed form (PDF or image).
-
-`submit_application_form` sends the document to Azure AI Document Intelligence `prebuilt-layout` (the same client as `POST /v1/forms/layout`). The layout JSON — page lines, tables, selection marks, and polygons — is mapped in `form_map.py` without a second Azure call.
-
-Mapped fields:
-
-| Field | Source |
-| --- | --- |
-| `full_name` | Name line beside الإسم / الاسم |
-| `national_id` | 14-digit value beside رقم إثبات الشخصية / الرقم القومي |
-| `gender` | Selection marks on the النوع row (left = أنثى, right = ذكر) |
-| `mobile` | 11-digit 01… value beside رقم الهاتف المحمول |
-| `speed` | Handwritten 30 / 70 / 100 Mbps choice, ignoring the printed option trio |
-
-Each field carries a status (`present`, `unreadable`, `absent`) with optional confidence. Review flags include `gender_low_confidence` and, against Stage 1, distinct `*_missing`, `*_unreadable`, `*_unverified`, and `*_mismatch` flags for name, National ID, and gender. Missing or unreadable values are never treated as a successful match.
-
-The Stage 1 identity snapshot prefers reviewer `final_value` on `front.full_name_ar`, `front.national_id` / `back.national_id`, and `derived.gender`. It falls back to the original extracted values when no correction exists.
-
-If any review flag is set, `form_status` becomes `pending_review`. If none are set, the form is stored as `approved`. A second upload returns HTTP 409 unless `form_status` is `resubmission_required`. Resubmitting the National ID clears previous form JSON, form status, and the stored form file.
-
-Standalone layout analysis remains available:
-
-```powershell
-curl.exe -s -X POST "http://127.0.0.1:8000/v1/forms/layout" -F "document=@path\to\form.pdf;type=application/pdf"
+```bash
+python -m pytest
 ```
 
-That endpoint returns full text, page lines, tables, selection marks, and bounding polygons. It does not attach the result to an application.
+The suite covers NID decoding, extraction geometry, classification, validation, duplicates and resubmit, review gates, form mapping, form review, Stage 1 cross-check, and **mocked** Azure layout. Optional tests that need local ID photographs or Playwright are skipped when those samples are not present.
 
-## Form human review
+## Example workflow
 
-The reviewer dashboard loads form fields from `GET /v1/review/applications/{application_id}`: extracted values, statuses, confidence, review flags, and the uploaded file at `form_url`. The reviewer can edit `full_name`, `national_id`, `gender`, `mobile`, and `speed`.
+1. Start Uvicorn from the repository root.
+2. Open the customer portal and submit National ID front and back images (use documents you are allowed to process; do not commit them).
+3. If status is `pending_review`, open the reviewer dashboard, inspect the card, correct fields if needed, and accept.
+4. When the ID is `approved`, download the blank form (if `dsl-application.pdf` is in place), fill it by hand, and upload it. This step calls Azure.
+5. If the form is `pending_review`, the reviewer inspects mapped fields and accepts, rejects, or requests a new form. The ID decision stays unchanged.
+6. The customer portal shows `status` and `form_status` as separate outcomes.
 
-`POST /v1/review/applications/{application_id}/form/decision` accepts:
+## Future Production Integrations
 
-| `action` | Form status | Notes |
-| --- | --- | --- |
-| `accept` | `approved` | Corrections are persisted; original mapped fields are unchanged |
-| `reject` | `rejected` | `reason` is required |
-| `resubmit` | `resubmission_required` | `reason` is required; the customer may upload a new form |
+The onboarding workflow is structured so an external identity-verification provider can be added later as a separate, explicit step: stored ID images, application records, and reviewer decisions already live independently of local OCR.
 
-The National ID `status` is not updated by a form decision. ID accept / reject / resubmit continues to use `POST /v1/review/applications/{application_id}/decision` and applies only while the ID is `pending_review`.
+One such provider is **VLens** (Digital Identity verification: national ID capture, liveness, and tenant-enabled authority checks). A production integration would keep provider credentials on the backend, invoke the vendor only when a user starts that step, and store the vendor result beside—not merged into—local extraction and human review.
 
-Form corrections are stored on the form record under `corrections`, separately from `fields`. The customer portal reads `form_status`, `application_form.message`, and `application_form.can_resubmit`.
+## Privacy
 
-## API reference
-
-Customer application responses include `status`, `form_status`, `stage`, `customer_message`, `can_resubmit`, `next_stage` (`available`, `blank_form_url`, `submit_url`, `can_upload`), and `application_form` (`status`, `fields`, `review_flags`, `needs_review`, `corrections`, `reviewer_action`, `reviewer_reason`, `can_resubmit`, `message`).
-
-Reviewer summaries include `status`, `form_status`, `automated_decision`, and `applicant_name`. Reviewer detail adds `extraction`, ID `corrections`, `review`, image URLs, `form`, and `form_url`.
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/health` | Liveness (`{"status": "ok"}`) |
-| `GET` | `/` | Customer portal |
-| `GET` | `/review` | Reviewer dashboard |
-| `POST` | `/v1/applications` | Create application (`front`, `back`, `customer_id`). Returns the customer view. Duplicate images or NID → 409. Unreadable/non-ID uploads → 422. |
-| `GET` | `/v1/applications/{id}` | Customer view for one application |
-| `GET` | `/v1/customers/{customer_id}/applications` | Applications for that customer |
-| `POST` | `/v1/applications/{id}/resubmit` | Replace ID images while `status` is `resubmission_required`. Clears any previous form. |
-| `GET` | `/v1/applications/{id}/front` | Stored front image |
-| `GET` | `/v1/applications/{id}/back` | Stored back image |
-| `GET` | `/v1/applications/{id}/form/blank` | Blank application PDF. Requires ID `approved` and stage `application_form` (otherwise 409). |
-| `POST` | `/v1/applications/{id}/form` | Upload completed form (`document`). Runs Azure layout, maps fields, cross-checks Stage 1, persists form status. Already submitted → 409. Missing Azure credentials → 503. |
-| `GET` | `/v1/applications/{id}/form` | Uploaded form file |
-| `GET` | `/v1/review/applications` | Reviewer queue (`?status=` filters ID status) |
-| `GET` | `/v1/review/applications/{id}` | Reviewer detail, including form fields when present |
-| `POST` | `/v1/review/applications/{id}/decision` | ID decision JSON `{ "action", "corrections", "reason" }` with `action` = `accept` \| `reject` \| `resubmit`. Reject and resubmit require `reason`. Incomplete accept → 422. Not pending → 409. |
-| `POST` | `/v1/review/applications/{id}/form/decision` | Form decision with the same JSON shape. Reject and resubmit require `reason`. Does not change ID `status`. Not pending → 409. |
-| `POST` | `/v1/forms/layout` | Ungated `prebuilt-layout` analysis of a PDF or image |
-| `POST` | `/v1/id-documents` | Run the ID pipeline on a front/back pair without creating an application |
-| `POST` | `/v1/reviews` | Build and persist a review JSON from extraction + corrections |
-| `GET` | `/v1/reviews/{review_id}` | Download a persisted review JSON |
-
-## Configuration
-
-Azure Document Intelligence is required for form upload and `POST /v1/forms/layout`. Copy `.env.example` to `.env` and set:
-
-```
-DOCUMENTINTELLIGENCE_ENDPOINT=https://YOUR-RESOURCE.cognitiveservices.azure.com/
-DOCUMENTINTELLIGENCE_API_KEY=
-```
-
-Values are read from the process environment, or from a local `.env` if the variable is not already set (`azure_layout.py`). `.env` is gitignored. `.env.example` contains placeholders only.
-
-National ID OCR does not use these variables; RapidOCR runs locally.
-
-## Architecture highlights
-
-**Staged and deterministic.** Imaging, OCR, extraction, classification, and policy are separate stages. Every decision is a named check with a severity, so a case can be explained line by line.
-
-**Layout as signal.** Egyptian ID print sits in stable bands. Extraction uses normalized coordinates, title-relative name geometry, and Arabic keyword maps — including dedicated crops for gender, religion, and expiry on the back.
-
-**Classification from multiple signals.** The classifier combines card title, expiry phrasing, printed gender and religion, serial pattern, portrait and barcode cues, and document-type markers.
-
-**Onboarding as a workflow.** Applications move through inspect → process → persist → approve / reject / review / resubmit, then into application-form download, layout analysis, mapping, and an independent form decision. Image and form replace is write-then-commit with backups, so a failed update restores the previous files.
-
-**Independent stage decisions.** National ID `status` and form `form_status` are stored and reviewed separately. A form that needs review does not reopen an accepted ID.
-
-**Privacy by construction.** National ID photographs are processed locally. ID photographs, SQLite, and `artifacts/` are gitignored. Azure credentials stay in untracked `.env`. The CLI redacts values unless explicitly requested.
-
-## Project layout
-
-```
-src/egyid/     Document Intelligence pipeline, Azure layout, form mapper, and API
-static/        Customer and reviewer consoles
-tests/         End-to-end and unit coverage
-scripts/       Synthetic field helpers
-```
+National ID photographs are processed locally. Form pages sent to Azure `prebuilt-layout` leave the machine. Do not commit ID images, filled forms, `.env`, SQLite files, or `artifacts/`. See [SECURITY.md](SECURITY.md).
 
 ## License
 
-Private project. All rights reserved.
+This repository does not include a license file yet. Until you add one, others do not have permission to copy, modify, or redistribute the code beyond GitHub’s terms for viewing public repositories.

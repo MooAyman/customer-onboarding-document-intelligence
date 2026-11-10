@@ -20,20 +20,33 @@ build/
 htmlcov/
 *.log
 
+# Editor / OS
+.cursor/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Local operator notes — not part of the project
+commands.txt
+
 # Live Azure responses may contain filled-form PII
 Azure Doc/
 
 # Local workflow data — never commit
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 *.db
 *.db-wal
 *.db-shm
 uploads/
 data/
 
-# Reference ID photographs contain PII — never commit
+# Reference ID photographs and scans contain PII — never commit
 National IDs/
+National IDs (Test)/
 *.jpeg
 *.jpg
 *.png
@@ -41,7 +54,4 @@ National IDs/
 *.tif
 *.tiff
 *.pdf
-forms/
 !tests/fixtures/**
-!static/forms/**
-!static/forms/**/*.pdf

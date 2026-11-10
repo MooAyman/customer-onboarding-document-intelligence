@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "egyid"
 version = "0.1.0"
-description = "Egyptian National ID document intelligence pipeline"
+description = "End-to-end document intelligence and identity verification for Egyptian National ID onboarding"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "fastapi>=0.115.0",

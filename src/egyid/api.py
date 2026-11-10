@@ -99,9 +99,12 @@ def _upload_rejected(exc: UploadRejected) -> JSONResponse:
 def create_app(store: Store | None = None) -> FastAPI:
     db = store or get_store()
     app = FastAPI(
-        title="Egyptian National ID Intelligence",
+        title="Document Intelligence & Identity Verification",
         version="0.1.0",
-        description="Staged document intelligence for Egyptian National ID front and back images.",
+        description=(
+            "End-to-end document intelligence and identity verification for "
+            "Egyptian National ID onboarding."
+        ),
     )
 
     @app.get("/health")
